@@ -123,7 +123,17 @@ function passwordRecoveryModal() {
 
 async function boot() {
   if ('serviceWorker' in navigator && location.protocol === 'https:') {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
+    const hadController = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then((reg) => {
+      reg.update().catch(() => {});
+      // muat ulang sekali saat versi baru aplikasi aktif
+      let reloaded = false;
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (reloaded || !hadController) return; // jangan reload pada kunjungan pertama
+        reloaded = true;
+        location.reload();
+      });
+    }).catch(() => {});
   }
   if (!isConfigured()) return setupScreen();
 
