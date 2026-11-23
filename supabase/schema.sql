@@ -28,7 +28,7 @@ create table if not exists public.events (
   start_time    time,
   end_time      time,
   mode          text not null default 'participant_qr'
-                check (mode in ('participant_qr', 'event_qr')),
+                check (mode in ('participant_qr', 'event_qr', 'hybrid')),
   theme         jsonb not null default '{}'::jsonb,
   form_schema   jsonb not null default '[]'::jsonb,
   settings      jsonb not null default '{}'::jsonb,
@@ -61,6 +61,7 @@ create table if not exists public.participants (
   email       text,
   phone       text,
   data        jsonb not null default '{}'::jsonb,
+  self_checkin boolean,           -- null = ikuti aturan acara, true = boleh, false = tidak boleh check-in mandiri
   created_at  timestamptz not null default now()
 );
 
@@ -75,7 +76,7 @@ create table if not exists public.attendances (
   scanned_by      uuid references public.profiles(id) on delete set null,
   device_label    text,
   device_id       text,
-  source          text not null default 'scan' check (source in ('scan', 'form', 'manual')),
+  source          text not null default 'scan' check (source in ('scan', 'form', 'manual', 'self')),
   client_id       text unique,
   constraint attendances_event_participant_key unique (event_id, participant_id)
 );
@@ -90,6 +91,21 @@ create table if not exists public.event_templates (
   settings     jsonb not null default '{}'::jsonb,
   categories   jsonb not null default '[]'::jsonb,
   created_at   timestamptz not null default now()
+);
+
+-- Migrasi untuk database yang sudah terpasang sebelumnya (aman dijalankan berulang)
+alter table public.participants add column if not exists self_checkin boolean;
+alter table public.events drop constraint if exists events_mode_check;
+alter table public.events add constraint events_mode_check check (mode in ('participant_qr', 'event_qr', 'hybrid'));
+alter table public.attendances drop constraint if exists attendances_source_check;
+alter table public.attendances add constraint attendances_source_check check (source in ('scan', 'form', 'manual', 'self'));
+
+-- Daftar email yang boleh membuat acara.
+-- KOSONG = semua akun boleh membuat acara. Jika diisi, hanya email di daftar ini yang boleh.
+create table if not exists public.pembuat_acara (
+  email      text primary key,
+  catatan    text,
+  created_at timestamptz not null default now()
 );
 
 create index if not exists participants_event_idx on public.participants(event_id);
@@ -120,6 +136,30 @@ returns boolean language sql stable security definer set search_path = public as
   );
 $$;
 
+create or replace function public.boleh_buat_acara()
+returns boolean language sql stable security definer set search_path = public, auth as $$
+  select not exists (select 1 from public.pembuat_acara)
+      or exists (select 1 from auth.users u
+                 join public.pembuat_acara a on lower(a.email) = lower(u.email)
+                 where u.id = auth.uid());
+$$;
+
+-- Apakah peserta boleh check-in mandiri (mode Campuran)?
+--   settings.self_checkin = { enabled, who: all | categories | listed, categories: [...] }
+--   participants.self_checkin: null = ikuti aturan, true/false = pengecualian per orang
+create or replace function public.can_self_checkin(p public.participants, e public.events)
+returns boolean language sql stable as $$
+  select e.mode = 'hybrid'
+     and coalesce((e.settings->'self_checkin'->>'enabled')::boolean, false)
+     and case
+           when p.self_checkin is not null then p.self_checkin
+           when coalesce(e.settings->'self_checkin'->>'who', 'all') = 'all' then true
+           when e.settings->'self_checkin'->>'who' = 'categories'
+             then coalesce(e.settings->'self_checkin'->'categories', '[]'::jsonb) ? coalesce(p.category, '')
+           else false
+         end;
+$$;
+
 create or replace function public.event_is_open(e public.events, p_at timestamptz default now())
 returns boolean language sql stable as $$
   select e.is_active and e.is_open
@@ -142,7 +182,10 @@ returns jsonb language sql stable as $$
     'categories', e.categories,
     'settings', jsonb_build_object(
       'rotating_qr', coalesce((e.settings->>'rotating_qr')::boolean, false),
-      'success_message', e.settings->>'success_message'
+      'success_message', e.settings->>'success_message',
+      'self_checkin', e.mode = 'hybrid' and coalesce((e.settings->'self_checkin'->>'enabled')::boolean, false),
+      'walkin', e.mode = 'hybrid' and coalesce((e.settings->'walkin'->>'enabled')::boolean, false),
+      'walkin_category', coalesce(nullif(e.settings->'walkin'->>'category', ''), 'Tamu tambahan')
     ),
     'is_open', public.event_is_open(e)
   );
@@ -201,6 +244,7 @@ alter table public.event_members   enable row level security;
 alter table public.participants    enable row level security;
 alter table public.attendances     enable row level security;
 alter table public.event_templates enable row level security;
+alter table public.pembuat_acara   enable row level security;  -- hanya bisa dikelola dari dashboard Supabase
 
 -- profiles
 drop policy if exists profiles_select on public.profiles;
@@ -216,7 +260,7 @@ create policy events_select on public.events for select to authenticated
   using (owner_id = auth.uid() or public.is_event_member(id));
 drop policy if exists events_insert on public.events;
 create policy events_insert on public.events for insert to authenticated
-  with check (owner_id = auth.uid());
+  with check (owner_id = auth.uid() and public.boleh_buat_acara());
 drop policy if exists events_update on public.events;
 create policy events_update on public.events for update to authenticated
   using (public.is_event_member(id, array['owner','admin']))
@@ -363,7 +407,7 @@ returns jsonb language sql stable security definer set search_path = public as $
   select public.safe_event_json(e) from public.events e where e.public_token = p_token and e.is_active;
 $$;
 
--- 5d. Submit formulir publik (mode QR Acara)
+-- 5d. Submit formulir publik (mode QR Acara, atau tamu tidak terdaftar di mode Campuran)
 create or replace function public.submit_public_attendance(
   p_token text, p_code text, p_data jsonb, p_device_id text default null
 ) returns jsonb language plpgsql security definer set search_path = public, extensions as $$
@@ -377,8 +421,11 @@ declare
   v_att    public.attendances;
 begin
   select * into v_event from public.events where public_token = p_token and is_active;
-  if not found or v_event.mode <> 'event_qr' then
+  if not found or v_event.mode = 'participant_qr' then
     return jsonb_build_object('status', 'invalid');
+  end if;
+  if v_event.mode = 'hybrid' and not coalesce((v_event.settings->'walkin'->>'enabled')::boolean, false) then
+    return jsonb_build_object('status', 'walkin_disabled');
   end if;
   if not public.event_is_open(v_event) then
     return jsonb_build_object('status', 'closed');
@@ -425,7 +472,10 @@ begin
   v_name := coalesce(nullif(trim(p_data->>'nama'), ''), 'Tanpa nama');
 
   insert into public.attendances (event_id, name, category, data, source, device_id, device_label)
-  values (v_event.id, left(v_name, 200), nullif(p_data->>'kategori', ''), p_data, 'form', p_device_id, 'Formulir')
+  values (v_event.id, left(v_name, 200),
+          case when v_event.mode = 'hybrid' then coalesce(nullif(v_event.settings->'walkin'->>'category', ''), 'Tamu tambahan')
+               else nullif(p_data->>'kategori', '') end,
+          p_data, 'form', p_device_id, 'Formulir')
   returning * into v_att;
 
   return jsonb_build_object('status', 'ok', 'name', v_att.name, 'checked_in_at', v_att.checked_in_at);
@@ -447,12 +497,64 @@ returns jsonb language sql stable security definer set search_path = public as $
       ), '{}'::jsonb)
     ),
     'event', public.safe_event_json(e),
+    'self_checkin_allowed', public.can_self_checkin(p, e),
     'checked_in_at', (select a.checked_in_at from public.attendances a
                       where a.event_id = e.id and a.participant_id = p.id)
   )
   from public.participants p join public.events e on e.id = p.event_id
   where p.qr_token = p_qr_token;
 $$;
+
+-- 5e2. Check-in mandiri oleh tamu (mode Campuran)
+--      Identitas: token e-ticket pribadi. Kehadiran di lokasi: QR/kode berputar dari layar acara.
+create or replace function public.self_check_in(
+  p_ticket text, p_event_token text default null, p_code text default null, p_device_id text default null
+) returns jsonb language plpgsql security definer set search_path = public, extensions as $$
+declare
+  v_p   public.participants;
+  v_e   public.events;
+  v_att public.attendances;
+  v_rot int;
+  v_win bigint;
+begin
+  select * into v_p from public.participants where qr_token = p_ticket;
+  if not found then return jsonb_build_object('status', 'invalid'); end if;
+  select * into v_e from public.events where id = v_p.event_id and is_active;
+  if not found then return jsonb_build_object('status', 'invalid'); end if;
+  if p_event_token is not null and p_event_token <> v_e.public_token then
+    return jsonb_build_object('status', 'wrong_event');
+  end if;
+  if not public.can_self_checkin(v_p, v_e) then
+    return jsonb_build_object('status', 'not_allowed', 'name', v_p.name);
+  end if;
+  if not public.event_is_open(v_e) then
+    return jsonb_build_object('status', 'closed');
+  end if;
+
+  -- Kode wajib jika QR berputar aktif, atau jika tamu mengetik kode secara manual
+  if coalesce((v_e.settings->>'rotating_qr')::boolean, false) or p_event_token is null then
+    v_rot := greatest(coalesce((v_e.settings->>'rotate_seconds')::int, 30), 10);
+    v_win := floor(extract(epoch from now()))::bigint / v_rot;
+    if upper(trim(coalesce(p_code, ''))) not in (
+      public.event_code(v_e.public_token, v_e.qr_secret, v_win),
+      public.event_code(v_e.public_token, v_e.qr_secret, v_win - 1),
+      public.event_code(v_e.public_token, v_e.qr_secret, v_win - 2)
+    ) then
+      return jsonb_build_object('status', 'expired_code');
+    end if;
+  end if;
+
+  insert into public.attendances (event_id, participant_id, name, category, data, source, device_id, device_label)
+  values (v_e.id, v_p.id, v_p.name, v_p.category, v_p.data, 'self', left(p_device_id, 64), 'Mandiri')
+  on conflict on constraint attendances_event_participant_key do nothing
+  returning * into v_att;
+
+  if not found then
+    select * into v_att from public.attendances where event_id = v_e.id and participant_id = v_p.id;
+    return jsonb_build_object('status', 'duplicate', 'name', v_p.name, 'checked_in_at', v_att.checked_in_at, 'source', v_att.source);
+  end if;
+  return jsonb_build_object('status', 'ok', 'name', v_p.name, 'category', v_p.category, 'checked_in_at', v_att.checked_in_at);
+end $$;
 
 -- 5f. Bergabung sebagai operator dengan kode undangan
 create or replace function public.join_event(p_code text)
@@ -495,6 +597,7 @@ grant execute on function public.check_in(uuid, text, uuid, text, text, timestam
 grant execute on function public.get_public_event(text) to anon, authenticated;
 grant execute on function public.submit_public_attendance(text, text, jsonb, text) to anon, authenticated;
 grant execute on function public.get_ticket(text) to anon, authenticated;
+grant execute on function public.self_check_in(text, text, text, text) to anon, authenticated;
 
 -- ---------------------------------------------------------------------
 -- 6. REALTIME

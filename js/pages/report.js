@@ -6,7 +6,7 @@ import { displayValue } from '../lib/form.js';
 import { toExcel, toCSV, toPDF } from '../lib/exporter.js';
 import { safeFileName } from '../lib/qr.js';
 
-const SOURCE = { scan: 'Scan QR', form: 'Formulir', manual: 'Manual' };
+const SOURCE = { scan: 'Scan panitia', form: 'Formulir', manual: 'Manual', self: 'Mandiri' };
 
 export default async function report(root, { params }) {
   const wrap = h('div', { class: 'container' });
@@ -109,8 +109,8 @@ export default async function report(root, { params }) {
     } else {
       statsBox.replaceChildren(
         stat(hadir, 'Total hadir', 'var(--ok)'),
-        stat(atts.filter((a) => a.source === 'form').length, 'Lewat formulir'),
-        stat(atts.filter((a) => a.source !== 'form').length, 'Lewat scan/manual'),
+        stat(atts.filter((a) => a.source === 'form' || a.source === 'self').length, 'Mandiri / formulir'),
+        stat(atts.filter((a) => a.source !== 'form' && a.source !== 'self').length, 'Lewat panitia'),
         stat(atts[0] ? hhmm(new Date(atts[atts.length - 1].checked_in_at).toTimeString()) + '–' + hhmm(new Date(atts[0].checked_in_at).toTimeString()) : '—', 'Rentang waktu'));
     }
     const catEntries = countBy((a) => a.category).map(([k, v]) => [k, v, categoryColor(ev, k)]);
@@ -130,9 +130,11 @@ export default async function report(root, { params }) {
             h('b', null, `${v}/${tot}`));
         })));
     } else catCard = bars('Per kategori', catEntries);
+    const walkins = atts.filter((a) => !a.participant_id).length;
     chartsBox.replaceChildren(timeline(), catCard,
+      ev.mode === 'hybrid' || walkins ? bars('Per cara absen', countBy((a) => (a.participant_id ? SOURCE[a.source] || a.source : 'Tamu tidak terdaftar'))) : null,
       bars('Per perangkat / meja', countBy((a) => a.device_label || SOURCE[a.source])),
-      bars('Per operator', countBy((a) => opName(a) || (a.source === 'form' ? 'Mandiri (formulir)' : ''))));
+      bars('Per operator', countBy((a) => opName(a) || (a.source === 'form' ? 'Formulir (tamu)' : a.source === 'self' ? 'Check-in mandiri' : ''))));
   }
 
   function rowsHadir() {

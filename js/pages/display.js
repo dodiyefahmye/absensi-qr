@@ -29,10 +29,11 @@ export default async function display(root, { params }) {
   const bar = h('div', { style: { height: '6px', background: theme.primary, borderRadius: '3px', transition: 'width 1s linear', width: '100%' } });
   let currentUrl = '';
 
-  const isEventQR = ev.mode === 'event_qr';
+  const isEventQR = ev.mode === 'event_qr' || ev.mode === 'hybrid';
   const left = isEventQR
     ? h('div', { class: 'display-qr' },
-      h('div', { style: { fontSize: '1.5rem', fontWeight: 800, marginBottom: '.75rem' } }, 'Scan untuk absen'),
+      h('div', { style: { fontSize: '1.5rem', fontWeight: 800, marginBottom: '.25rem' } }, ev.mode === 'hybrid' ? 'Scan untuk check-in' : 'Scan untuk absen'),
+      ev.mode === 'hybrid' ? h('div', { style: { fontSize: '.95rem', color: '#475569', marginBottom: '.6rem' } }, 'Peserta terdaftar: buka e-ticket → "Check-in" → scan QR ini') : null,
       qrCanvas,
       h('div', { style: { background: '#e2e8f0', borderRadius: '3px', marginTop: '.75rem', overflow: 'hidden' } }, bar),
       qrInfo)
@@ -82,14 +83,16 @@ export default async function display(root, { params }) {
       const url = publicFormUrl(info.token, info.rotating ? info.code : null);
       if (url !== currentUrl) { currentUrl = url; await drawQR(qrCanvas, url, { size: 720, dark: '#000', margin: 2 }); }
       rotateSec = info.rotate_seconds;
+      const codeEl = ev.mode === 'hybrid' ? h('div', { style: { marginTop: '.35rem', fontSize: '1.05rem' } }, 'Kode: ', h('b', { class: 'mono', style: { fontSize: '1.6rem', letterSpacing: '.2em' } }, info.code)) : null;
       if (info.rotating) {
         remaining = info.expires_in;
-        qrInfo.replaceChildren(h('span', null, `QR berganti tiap ${rotateSec} detik`));
+        qrInfo.replaceChildren(h('span', null, `QR berganti tiap ${rotateSec} detik`), codeEl);
         qrTimer = setTimeout(refreshQR, info.expires_in * 1000 + 300);
       } else {
         remaining = 0; bar.style.width = '0';
-        qrInfo.replaceChildren(h('a', { href: 'javascript:void 0', onclick: () => copyText(currentUrl), style: { color: '#64748b', fontSize: '.85rem' } }, 'Salin link formulir'));
-        qrTimer = setTimeout(refreshQR, 5 * 60 * 1000);
+        qrInfo.replaceChildren(codeEl, h('a', { href: 'javascript:void 0', onclick: () => copyText(currentUrl), style: { color: '#64748b', fontSize: '.85rem' } }, 'Salin link formulir'));
+        // kode manual di mode Campuran tetap berganti walau QR tidak berputar
+        qrTimer = setTimeout(refreshQR, ev.mode === 'hybrid' ? info.expires_in * 1000 + 300 : 5 * 60 * 1000);
       }
     } catch (e) {
       qrInfo.textContent = 'Gagal memuat QR, mencoba lagi…';

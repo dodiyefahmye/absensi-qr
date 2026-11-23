@@ -7,6 +7,7 @@ import { renderTicket, ticketsToPDF } from '../lib/ticket.js';
 import { categoryColor, contrastInk } from '../lib/theme.js';
 import { toExcel, readSpreadsheet } from '../lib/exporter.js';
 import { loadJSZip } from '../lib/vendor.js';
+import { canSelfCheckin, selfCheckinConfig } from '../lib/rules.js';
 
 export function participantsTab(body, { ev }) {
   let people = [], attended = new Map(), shown = 200;
@@ -16,10 +17,20 @@ export function participantsTab(body, { ev }) {
   const summary = h('span', { class: 'small muted' });
   const tableBox = h('div', null, spinner());
   const extraFields = (ev.form_schema || []).filter((f) => f.key !== 'nama' && !['signature', 'photo'].includes(f.type));
+  const hybrid = ev.mode === 'hybrid';
+  const scOn = hybrid && selfCheckinConfig(ev).enabled;
+  const selfBadge = (p) => {
+    if (!scOn) return null;
+    const ok = canSelfCheckin(p, ev);
+    const why = p.self_checkin === true ? ' (ditandai)' : p.self_checkin === false ? ' (dikecualikan)' : '';
+    return h('span', { class: 'badge ' + (ok ? 'ok' : ''), title: ok ? 'Boleh check-in mandiri' + why : 'Wajib dipindai panitia' + why }, (ok ? '📱 Mandiri' : '🧑‍💼 Panitia') + (why ? ' •' : ''));
+  };
 
   const note = ev.mode === 'event_qr'
     ? h('div', { class: 'card flat small', style: { marginBottom: '1rem', background: 'var(--surface-2)' } },
       'ℹ️ Acara ini memakai mode QR Acara: peserta tidak perlu didaftarkan, mereka mengisi formulir sendiri. Daftar peserta di sini opsional (mis. untuk undangan khusus yang dipindai panitia).')
+    : hybrid && !scOn ? h('div', { class: 'card flat small', style: { marginBottom: '1rem', background: 'var(--surface-2)' } },
+      'ℹ️ Mode Campuran: check-in mandiri sedang nonaktif. Aktifkan di tab Pengaturan agar peserta bisa check-in sendiri.')
     : null;
 
   body.append(note || '',
@@ -67,6 +78,7 @@ export function participantsTab(body, { ev }) {
         h('td', null, p.category ? h('span', { class: 'badge', style: { background: col, color: contrastInk(col), borderColor: col } }, p.category) : ''),
         ...extraFields.slice(0, 2).map((f) => h('td', { class: 'small hide-sm' }, displayValue(f, p.data?.[f.key]))),
         h('td', null, a ? h('span', { class: 'badge ok' }, '✓ ' + fmtTime(a.checked_in_at)) : h('span', { class: 'badge' }, 'Belum')),
+        scOn ? h('td', null, selfBadge(p)) : null,
         h('td', { class: 'actions' },
           h('button', { class: 'btn sm', title: 'E-ticket & QR', onclick: () => ticketDialog(p) }, '🎫'),
           h('button', { class: 'btn sm ghost', title: 'Ubah', onclick: () => edit(p) }, '✏️'),
@@ -74,7 +86,7 @@ export function participantsTab(body, { ev }) {
     });
     tableBox.replaceChildren(
       h('div', { class: 'table-wrap' }, h('table', null,
-        h('thead', null, h('tr', null, h('th', null, 'Nama'), h('th', null, 'Kategori'), ...extraFields.slice(0, 2).map((f) => h('th', { class: 'hide-sm' }, f.label)), h('th', null, 'Status'), h('th', null, ''))),
+        h('thead', null, h('tr', null, h('th', null, 'Nama'), h('th', null, 'Kategori'), ...extraFields.slice(0, 2).map((f) => h('th', { class: 'hide-sm' }, f.label)), h('th', null, 'Status'), scOn ? h('th', null, 'Check-in') : null, h('th', null, ''))),
         h('tbody', null, rows))),
       list.length > shown ? h('div', { class: 'center', style: { marginTop: '.75rem' } }, h('button', { class: 'btn', onclick: () => { shown += 300; render(); } }, 'Tampilkan lebih banyak')) : '');
   }
@@ -89,12 +101,17 @@ export function participantsTab(body, { ev }) {
     catSel.value = p?.category || (ev.categories?.[0]?.name ?? '');
     const email = h('input', { type: 'email', value: p?.email || '' });
     const phone = h('input', { type: 'tel', value: p?.phone || '' });
+    const selfSel = h('select', null,
+      h('option', { value: '' }, 'Ikuti aturan acara'), h('option', { value: 'true' }, 'Selalu boleh check-in mandiri'), h('option', { value: 'false' }, 'Tidak boleh, wajib dipindai panitia'));
+    selfSel.value = p?.self_checkin === true ? 'true' : p?.self_checkin === false ? 'false' : '';
     const hasEmailField = ev.form_schema.some((f) => f.type === 'email');
     const hasPhoneField = ev.form_schema.some((f) => f.type === 'tel');
     modal({
       title: p ? 'Ubah peserta' : 'Tambah peserta', wide: true,
       body: h('div', { class: 'stack' }, form.el,
         h('label', { class: 'field' }, h('span', { class: 'lbl' }, 'Kategori'), catSel),
+        hybrid ? h('label', { class: 'field' }, h('span', { class: 'lbl' }, 'Check-in mandiri'), selfSel,
+          h('div', { class: 'help' }, scOn ? 'Pengecualian untuk orang ini, di atas aturan di Pengaturan.' : 'Check-in mandiri sedang nonaktif di Pengaturan.')) : null,
         !hasEmailField || !hasPhoneField ? h('div', { class: 'grid grid-2' },
           !hasEmailField ? h('label', { class: 'field' }, h('span', { class: 'lbl' }, 'Email (opsional)'), email) : null,
           !hasPhoneField ? h('label', { class: 'field' }, h('span', { class: 'lbl' }, 'No. HP (opsional)'), phone) : null) : null),
@@ -104,7 +121,8 @@ export function participantsTab(body, { ev }) {
         const { nama, ...data } = v;
         const emailVal = hasEmailField ? (ev.form_schema.filter((f) => f.type === 'email').map((f) => v[f.key]).find(Boolean) || null) : email.value.trim() || null;
         const phoneVal = hasPhoneField ? (ev.form_schema.filter((f) => f.type === 'tel').map((f) => v[f.key]).find(Boolean) || null) : phone.value.trim() || null;
-        const row = await api.saveParticipant({ ...(p ? { id: p.id } : { event_id: ev.id }), name: nama, category: catSel.value || null, email: emailVal, phone: phoneVal, data });
+        const row = await api.saveParticipant({ ...(p ? { id: p.id } : { event_id: ev.id }), name: nama, category: catSel.value || null, email: emailVal, phone: phoneVal, data,
+          ...(hybrid ? { self_checkin: selfSel.value === '' ? null : selfSel.value === 'true' } : {}) });
         const i = people.findIndex((x) => x.id === row.id);
         if (i >= 0) people[i] = row; else people.unshift(row);
         render();
@@ -162,6 +180,18 @@ export function participantsTab(body, { ev }) {
     } catch (e) { m.close(); toast(errMsg(e), 'err'); }
   }
 
+  async function bulkSelf(val) {
+    const list = filtered();
+    if (!list.length) return toast('Tidak ada peserta', 'warn');
+    const label = val === true ? 'boleh check-in mandiri' : val === false ? 'wajib dipindai panitia' : 'mengikuti aturan acara';
+    if (!(await confirmDialog(`Ubah ${list.length} peserta menjadi "${label}"?`))) return;
+    try {
+      await api.setSelfCheckin(list.map((p) => p.id), val);
+      for (const p of list) p.self_checkin = val;
+      render(); toast('Pengaturan check-in mandiri diperbarui', 'ok');
+    } catch (e) { toast(errMsg(e), 'err'); }
+  }
+
   async function printCards() {
     const list = filtered();
     if (!list.length) return toast('Tidak ada peserta', 'warn');
@@ -174,7 +204,7 @@ export function participantsTab(body, { ev }) {
   }
 
   function templateColumns() {
-    return ['Nama', 'Kategori', 'Email', 'No HP', ...extraFields.filter((f) => !['email', 'tel'].includes(f.type)).map((f) => f.label)];
+    return ['Nama', 'Kategori', 'Email', 'No HP', ...extraFields.filter((f) => !['email', 'tel'].includes(f.type)).map((f) => f.label), ...(hybrid ? ['Check-in mandiri'] : [])];
   }
 
   async function downloadTemplate() {
@@ -223,6 +253,9 @@ export function participantsTab(body, { ev }) {
     const CAT = ['kategori', 'category', 'jenis', 'tipe'];
     const EMAIL = ['email', 'surel', 'emailaddress'];
     const PHONE = ['nohp', 'hp', 'phone', 'telepon', 'notelp', 'whatsapp', 'wa', 'nowa', 'nomorhp'];
+    const SELF = ['checkinmandiri', 'mandiri', 'selfcheckin', 'absenmandiri'];
+    const yes = (v) => /^(ya|y|yes|boleh|1|true|iya)$/i.test(v);
+    const no = (v) => /^(tidak|tdk|no|n|0|false|tidakboleh|panitia)$/i.test(v.replace(/\s+/g, ''));
     const out = [];
     for (const r of raw) {
       const row = { event_id: ev.id, name: '', category: null, email: null, phone: null, data: {} };
@@ -231,6 +264,7 @@ export function participantsTab(body, { ev }) {
         if (!val) continue;
         if (NAME.includes(nk)) row.name = val;
         else if (CAT.includes(nk)) row.category = val;
+        else if (SELF.includes(nk)) { if (yes(val)) row.self_checkin = true; else if (no(val)) row.self_checkin = false; }
         else if (fieldMap.has(nk)) {
           const f = fieldMap.get(nk);
           row.data[f.key] = f.type === 'checkbox' ? val.split(/,\s*/) : val;
@@ -253,6 +287,13 @@ export function participantsTab(body, { ev }) {
     modal({
       title: 'Tindakan lain',
       body: h('div', { class: 'stack' },
+        hybrid ? h('div', { class: 'card flat stack', style: { padding: '.8rem' } },
+          h('b', null, 'Check-in mandiri untuk peserta yang tampil (sesuai filter)'),
+          h('div', { class: 'small muted' }, `${filtered().length} peserta akan diubah.`),
+          h('div', { class: 'row' },
+            h('button', { class: 'btn sm', onclick: () => bulkSelf(true) }, 'Boleh mandiri'),
+            h('button', { class: 'btn sm', onclick: () => bulkSelf(false) }, 'Wajib panitia'),
+            h('button', { class: 'btn sm ghost', onclick: () => bulkSelf(null) }, 'Ikuti aturan'))) : null,
         h('button', { class: 'btn block', onclick: printCards }, '🖨 Cetak kartu peserta (PDF A4)'),
         h('a', { class: 'btn block', href: `#/event/${ev.id}?tab=kartu` }, '🎫 Ubah desain kartu'),
         h('button', { class: 'btn block', onclick: downloadTemplate }, '⬇ Unduh template Excel'),

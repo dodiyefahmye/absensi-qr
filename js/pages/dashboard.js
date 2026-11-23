@@ -3,7 +3,7 @@ import { h, toast, modal, errMsg, navigate, fmtDate, hhmm, spinner, confirmDialo
 import { BUILTIN_TEMPLATES, normalizeTheme, contrastInk } from '../lib/theme.js';
 
 const ROLE_LABEL = { owner: 'Pemilik', admin: 'Admin', scanner: 'Operator' };
-const MODE_LABEL = { participant_qr: 'QR Peserta', event_qr: 'QR Acara' };
+import { MODE_LABEL, usesParticipantScan } from '../lib/rules.js';
 
 export default async function dashboard(root) {
   const wrap = h('div', { class: 'container' });
@@ -42,7 +42,7 @@ export default async function dashboard(root) {
     const t = normalizeTheme(ev.theme);
     const counts = h('span', { class: 'small muted' }, '…');
     api.eventCounts(ev.id).then((c) => {
-      counts.textContent = ev.mode === 'participant_qr'
+      counts.textContent = usesParticipantScan(ev)
         ? `${c.attendances} hadir dari ${c.participants} peserta`
         : `${c.attendances} hadir`;
     }).catch(() => { counts.textContent = ''; });
@@ -60,7 +60,7 @@ export default async function dashboard(root) {
       counts,
       h('div', { class: 'row', style: { marginTop: 'auto' } },
         canEdit ? h('a', { class: 'btn sm primary', href: `#/event/${ev.id}` }, '⚙️ Kelola') : null,
-        ev.mode === 'participant_qr' ? h('a', { class: 'btn sm', href: `#/event/${ev.id}/scan` }, '📷 Scan') : null,
+        usesParticipantScan(ev) ? h('a', { class: 'btn sm', href: `#/event/${ev.id}/scan` }, '📷 Scan') : null,
         h('a', { class: 'btn sm', href: `#/event/${ev.id}/display` }, '🖥️ Layar'),
         h('a', { class: 'btn sm', href: `#/event/${ev.id}/monitor` }, '📈 Monitor'),
         h('a', { class: 'btn sm', href: `#/event/${ev.id}/report` }, '📊 Laporan')));

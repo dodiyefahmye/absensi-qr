@@ -12,7 +12,7 @@ dengan **GitHub Pages** + **Supabase**.
 
 | Kategori | Fitur |
 |---|---|
-| **Dua mode absensi** | 🎫 **QR Peserta**: setiap peserta punya e-ticket QR unik dan panitia memindai di pintu masuk.<br>🖥️ **QR Acara**: satu QR tampil di layar, peserta memindai lalu mengisi formulir di HP sendiri. |
+| **Tiga mode absensi** | 🎫 **QR Peserta**: setiap peserta punya e-ticket QR unik dan panitia memindai di pintu masuk.<br>🖥️ **QR Acara**: satu QR tampil di layar, peserta memindai lalu mengisi formulir di HP sendiri.<br>🔀 **Campuran**: peserta terdaftar bisa dipindai panitia **atau** check-in mandiri (buka e-ticket → scan QR layar). Pemilik acara menentukan siapa yang boleh mandiri: semua peserta, kategori tertentu, atau orang tertentu, plus pengecualian per orang. Tamu tidak terdaftar bisa diizinkan mengisi formulir. |
 | **Kustomisasi** | Nama acara, logo, banner, 4 warna tema, 8 pilihan font, kategori peserta berwarna (VIP, Undangan, dll.) |
 | **Form builder** | Tambah, hapus, dan urutkan field (drag & drop). Tipe: teks, paragraf, angka, email, no. HP, tanggal, dropdown, pilihan ganda, centang, **tanda tangan digital**, **foto** |
 | **Template** | 4 template bawaan (Rapat, Seminar, Formal, Kosong) dan bisa menyimpan template sendiri |
@@ -107,6 +107,12 @@ Setiap kali Anda push ke `main`, aplikasi otomatis ter-update.
 6. Tab **Operator**: bagikan kode undangan ke panitia lain.
 7. Hari-H: tiap meja registrasi buka **📷 Scanner**, isi nama perangkat ("Meja 1", "Pintu Utara"), lalu tekan **Mulai scan**.
 8. Pasang **🖥️ Layar tampilan** di proyektor untuk ucapan selamat datang realtime.
+
+### C. Acara campuran (panitia + check-in mandiri)
+1. **Buat acara** → template *Wisuda / Campuran*, atau ubah mode di **Pengaturan → Campuran**.
+2. **Pengaturan → 🔀 Check-in mandiri**: pilih siapa yang boleh check-in sendiri (semua / kategori tertentu / yang ditandai). Bisa juga mengizinkan tamu tidak terdaftar.
+3. Pengecualian per orang ada di tab **Peserta** (✏️ Ubah → *Check-in mandiri*), atau secara massal lewat menu **⋯**. Bisa juga lewat kolom Excel `Check-in mandiri` (Ya/Tidak).
+4. Hari-H: tampilkan **🖥️ Layar tampilan** (QR + kode berganti otomatis). Tamu membuka e-ticket → **"Saya sudah tiba, Check-in"** → scan QR layar, atau ketik kodenya. Yang tidak boleh mandiri tetap dipindai panitia seperti biasa.
 
 ### B. Rapat (mode QR Acara)
 1. **Buat acara** → template *Rapat Internal* (sudah ada field NIP, jabatan, tanda tangan).

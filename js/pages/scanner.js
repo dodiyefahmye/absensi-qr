@@ -225,7 +225,7 @@ export default async function scanner(root, { params }) {
         break;
       case 'duplicate': {
         const by = r.scanned_by_name ? ` oleh ${r.scanned_by_name}` : '';
-        const dev = r.attendance?.device_label ? ` (${r.attendance.device_label})` : '';
+        const dev = r.attendance?.source === 'self' ? ' (check-in mandiri)' : r.attendance?.device_label ? ` (${r.attendance.device_label})` : '';
         showOverlay('dup', '!', p?.name || 'Sudah absen', `Sudah absen pukul ${fmtTime(r.attendance?.checked_in_at)}${by}${dev}`, p?.category);
         break;
       }

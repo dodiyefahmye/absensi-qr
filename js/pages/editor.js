@@ -6,6 +6,7 @@ import { participantsTab } from '../components/participants.js';
 import { ticketDesignerTab } from '../components/ticket-designer.js';
 import { renderForm } from '../lib/form.js';
 import { drawQR, joinUrl, publicFormUrl } from '../lib/qr.js';
+import { usesParticipantScan, usesEventQR, selfCheckinConfig, walkinConfig } from '../lib/rules.js';
 
 const TABS = [
   ['info', '📄 Info'], ['branding', '🎨 Tampilan'], ['form', '🧾 Formulir'],
@@ -24,7 +25,7 @@ export default async function editor(root, { params, query }) {
     wrap.replaceChildren(h('div', { class: 'card empty' }, h('p', null, 'Acara tidak ditemukan atau Anda tidak punya akses.'), h('a', { class: 'btn', href: '#/' }, 'Kembali')));
     return;
   }
-  if (role === 'scanner') { navigate(`/event/${ev.id}/${ev.mode === 'participant_qr' ? 'scan' : 'display'}`); return; }
+  if (role === 'scanner') { navigate(`/event/${ev.id}/${usesParticipantScan(ev) ? 'scan' : 'display'}`); return; }
 
   let current = TABS.some(([k]) => k === query.tab) ? query.tab : 'info';
   let tabCleanup = null;
@@ -33,11 +34,11 @@ export default async function editor(root, { params, query }) {
   const body = h('div');
 
   const quick = () => h('div', { class: 'row' },
-    ev.mode === 'participant_qr' ? h('a', { class: 'btn sm primary', href: `#/event/${ev.id}/scan` }, '📷 Scanner') : null,
+    usesParticipantScan(ev) ? h('a', { class: 'btn sm primary', href: `#/event/${ev.id}/scan` }, '📷 Scanner') : null,
     h('a', { class: 'btn sm', href: `#/event/${ev.id}/display` }, '🖥️ Layar tampilan'),
     h('a', { class: 'btn sm', href: `#/event/${ev.id}/monitor` }, '📈 Monitor'),
     h('a', { class: 'btn sm', href: `#/event/${ev.id}/report` }, '📊 Laporan'),
-    ev.mode === 'event_qr' ? h('button', { class: 'btn sm', onclick: () => copyText(publicFormUrl(ev.public_token)) }, '🔗 Salin link formulir') : null);
+    usesEventQR(ev) ? h('button', { class: 'btn sm', onclick: () => copyText(publicFormUrl(ev.public_token)) }, '🔗 Salin link check-in') : null);
   const quickBox = h('div');
   wrap.replaceChildren(
     h('div', { class: 'row', style: { marginBottom: '.25rem' } }, h('a', { href: '#/', class: 'small' }, '← Semua acara')),
@@ -192,6 +193,8 @@ function formTab(body, { ev, save }) {
   });
   const info = ev.mode === 'event_qr'
     ? 'Formulir ini diisi peserta di HP masing-masing setelah memindai QR acara.'
+    : ev.mode === 'hybrid'
+    ? 'Field ini menjadi kolom data peserta, dan juga formulir untuk tamu tidak terdaftar (jika diizinkan di Pengaturan).'
     : 'Field ini menjadi kolom data peserta (untuk input manual & import Excel) dan ikut tampil di laporan.';
   body.appendChild(h('div', { style: { maxWidth: '820px' } },
     h('div', { class: 'row between', style: { marginBottom: '1rem' } },
@@ -266,10 +269,11 @@ function settingsTab(body, { ev, save }) {
   let mode = ev.mode;
   let categories = JSON.parse(JSON.stringify(ev.categories || []));
 
-  const modeBox = h('div', { class: 'grid grid-2' });
+  const modeBox = h('div', { class: 'grid', style: { gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))' } });
   const renderMode = () => modeBox.replaceChildren(...[
     ['participant_qr', '🎫 QR Peserta', 'Setiap peserta punya QR/e-ticket unik. Panitia memindai di meja registrasi. Cocok untuk acara formal & undangan.'],
     ['event_qr', '🖥️ QR Acara', 'Satu QR ditampilkan di layar. Peserta memindai dengan HP lalu mengisi formulir. Cocok untuk rapat & acara terbuka.'],
+    ['hybrid', '🔀 Campuran', 'Peserta terdaftar bisa dipindai panitia ATAU check-in mandiri dengan HP. Bisa juga menerima tamu tidak terdaftar. Siapa yang boleh mandiri diatur di bawah.'],
   ].map(([k, t, d]) => h('button', { type: 'button', class: 'card flat', style: { textAlign: 'left', cursor: 'pointer', borderWidth: '2px', borderColor: mode === k ? 'var(--primary)' : 'var(--border)', font: 'inherit', color: 'inherit' }, onclick: () => { mode = k; renderMode(); syncVis(); } },
     h('strong', null, t), h('p', { class: 'small muted', style: { margin: '.3rem 0 0' } }, d))));
   renderMode();
@@ -303,7 +307,55 @@ function settingsTab(body, { ev, save }) {
   const pqBox = h('div', { class: 'card stack' },
     h('h3', null, 'Pengaturan Scanner'),
     h('label', { class: 'field' }, h('span', { class: 'lbl' }, 'Lama tampilan hasil scan (ms)'), resetMs, h('div', { class: 'help' }, 'Makin kecil makin cepat antrean. Disarankan 1200–2000.')));
-  const syncVis = () => { eqBox.classList.toggle('hidden', mode !== 'event_qr'); pqBox.classList.toggle('hidden', mode !== 'participant_qr'); };
+  // ---------- check-in mandiri (mode Campuran) ----------
+  const sc = JSON.parse(JSON.stringify(selfCheckinConfig(ev)));
+  const wk = JSON.parse(JSON.stringify(walkinConfig(ev)));
+  const scOn = switchEl(sc.enabled, 'Izinkan check-in mandiri dengan HP peserta', () => syncSc());
+  const whoBox = h('div', { class: 'stack', style: { gap: '.4rem' } });
+  const catChecks = h('div', { class: 'grid', style: { gridTemplateColumns: 'repeat(auto-fill, minmax(170px, 1fr))', gap: '.35rem', paddingLeft: '1.8rem' } });
+  const renderCatChecks = () => catChecks.replaceChildren(...(categories.filter((c) => c.name.trim()).length
+    ? categories.filter((c) => c.name.trim()).map((c) => h('label', { class: 'check' },
+      h('input', { type: 'checkbox', checked: sc.categories.includes(c.name), onchange: (e) => {
+        sc.categories = e.target.checked ? [...new Set([...sc.categories, c.name])] : sc.categories.filter((x) => x !== c.name);
+      } }), h('span', { class: 'dot', style: { background: c.color || '#64748b', marginTop: '.45rem' } }), h('span', null, c.name)))
+    : [h('span', { class: 'small muted' }, 'Belum ada kategori. Tambahkan di kartu "Kategori peserta" di bawah.')]));
+  const whoOpt = (val, title, desc) => h('label', { class: 'check' },
+    h('input', { type: 'radio', name: 'sc-who', value: val, checked: sc.who === val, onchange: () => { sc.who = val; syncSc(); } }),
+    h('span', null, h('b', null, title), h('br'), h('span', { class: 'small muted' }, desc)));
+  whoBox.append(
+    whoOpt('all', 'Semua peserta terdaftar', 'Setiap peserta dengan e-ticket boleh check-in sendiri.'),
+    whoOpt('categories', 'Hanya kategori tertentu', 'Mis. Orang Tua & Undangan boleh mandiri, Wisudawan wajib dipindai panitia.'),
+    catChecks,
+    whoOpt('listed', 'Hanya peserta yang ditandai', 'Pilih orangnya satu per satu di tab Peserta.'));
+  const syncSc = () => {
+    whoBox.style.opacity = scOn.input.checked ? '1' : '.45';
+    whoBox.style.pointerEvents = scOn.input.checked ? '' : 'none';
+    catChecks.classList.toggle('hidden', sc.who !== 'categories');
+    renderCatChecks();
+  };
+  const wkOn = switchEl(wk.enabled, 'Izinkan tamu tidak terdaftar check-in dengan mengisi formulir');
+  const wkCat = h('input', { type: 'text', value: wk.category || 'Tamu tambahan', style: { maxWidth: '260px' } });
+  const hyBox = h('div', { class: 'card stack' },
+    h('h3', null, '🔀 Check-in mandiri'),
+    h('p', { class: 'small muted', style: { margin: 0 } }, 'Peserta membuka e-ticket di HP-nya, menekan "Check-in", lalu memindai QR yang tampil di Layar tampilan. Identitas dibuktikan dari e-ticket pribadi, kehadiran di lokasi dibuktikan dari QR layar yang berganti otomatis.'),
+    scOn.el,
+    h('div', null, h('div', { style: { fontWeight: 600, fontSize: '.9rem', marginBottom: '.35rem' } }, 'Siapa yang boleh check-in mandiri?'), whoBox),
+    h('div', { class: 'help' }, '💡 Pengecualian per orang (selalu boleh / tidak boleh) bisa diatur di tab Peserta, dan berlaku di atas aturan ini. Peserta yang tidak boleh mandiri tetap bisa dipindai panitia.'),
+    h('hr', { style: { border: 0, borderTop: '1px solid var(--border)', width: '100%' } }),
+    wkOn.el,
+    h('label', { class: 'field' }, h('span', { class: 'lbl' }, 'Kategori untuk tamu tidak terdaftar'), wkCat,
+      h('div', { class: 'help' }, 'Tamu ini mengisi formulir dari tab Formulir dan dicatat terpisah dari daftar undangan.')));
+  syncSc();
+  // perbarui daftar kategori di aturan mandiri saat kategori diubah
+  catList.addEventListener('input', () => renderCatChecks());
+  catList.addEventListener('click', () => setTimeout(renderCatChecks, 0));
+
+  const syncVis = () => {
+    eqBox.classList.toggle('hidden', mode === 'participant_qr');
+    pqBox.classList.toggle('hidden', mode === 'event_qr');
+    hyBox.classList.toggle('hidden', mode !== 'hybrid');
+    eqBox.querySelector('h3').textContent = mode === 'hybrid' ? 'Pengaturan QR di layar (untuk check-in mandiri)' : 'Pengaturan QR Acara';
+  };
   syncVis();
 
   body.appendChild(h('div', { class: 'stack', style: { maxWidth: '860px' } },
@@ -315,10 +367,12 @@ function settingsTab(body, { ev, save }) {
         h('label', { class: 'field' }, h('span', { class: 'lbl' }, 'Buka otomatis mulai (opsional)'), openAt),
         h('label', { class: 'field' }, h('span', { class: 'lbl' }, 'Tutup otomatis pada (opsional)'), closeAt)),
       h('label', { class: 'field' }, h('span', { class: 'lbl' }, 'Pesan setelah berhasil absen'), success)),
-    eqBox, pqBox,
+    hyBox, eqBox, pqBox,
     h('div', { class: 'card stack' }, h('h3', null, 'Kategori peserta'), h('p', { class: 'small muted' }, 'Warna kategori tampil sebagai badge saat scan, di tiket, dan laporan.'), catList),
     h('div', { class: 'row end' }, h('button', { class: 'btn primary lg', onclick: async () => {
       if (openAt.value && closeAt.value && new Date(openAt.value) >= new Date(closeAt.value)) return toast('Waktu tutup harus setelah waktu buka', 'err');
+      if (mode === 'hybrid' && scOn.input.checked && sc.who === 'categories' && !sc.categories.length) return toast('Pilih minimal satu kategori yang boleh check-in mandiri', 'err');
+      if (mode === 'hybrid' && scOn.input.checked && !rot.input.checked) toast('Saran: aktifkan "QR berganti otomatis" agar QR layar tidak bisa difoto & dipakai dari luar lokasi', 'warn');
       await save({
         mode, categories: categories.filter((c) => c.name.trim()).map((c) => ({ name: c.name.trim(), color: c.color })),
         is_open: isOpen.input.checked, is_active: isActive.input.checked,
@@ -326,7 +380,9 @@ function settingsTab(body, { ev, save }) {
         close_at: closeAt.value ? new Date(closeAt.value).toISOString() : null,
         settings: { ...s, rotating_qr: rot.input.checked, rotate_seconds: Math.max(10, Number(rotSec.value) || 30),
           one_submit_per_device: perDevice.input.checked, unique_field: uniq.value, success_message: success.value.trim(),
-          scan_reset_ms: Math.min(5000, Math.max(600, Number(resetMs.value) || 1600)) },
+          scan_reset_ms: Math.min(5000, Math.max(600, Number(resetMs.value) || 1600)),
+          self_checkin: { enabled: scOn.input.checked, who: sc.who, categories: sc.categories },
+          walkin: { enabled: wkOn.input.checked, category: wkCat.value.trim() || 'Tamu tambahan' } },
       }, 'Pengaturan tersimpan');
     } }, 'Simpan pengaturan')),
     h('div', { class: 'card stack', style: { borderColor: 'var(--err)' } },
