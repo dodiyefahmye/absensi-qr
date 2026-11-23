@@ -106,10 +106,45 @@ export default async function scanner(root, { params }) {
     recent.unshift(a); recent = recent.slice(0, 30); renderRecent();
   }
 
+  // ---------- pengaturan kamera (pilih kamera, mirror) ----------
+  const camLabel = (c, i) => c.label || `Kamera ${i + 1}`;
+  const isFrontLabel = (l) => /front|depan|user|facetime|integrated|webcam|hd camera|usb2\.0 hd/i.test(l || '');
+  function mirrorOn() {
+    const v = localStorage.getItem('camera-mirror');
+    if (v === '1') return true;
+    if (v === '0') return false;
+    const cur = cameras[camIndex];
+    return cur ? isFrontLabel(cur.label) : false; // otomatis: mirror untuk kamera depan/webcam
+  }
+  function applyMirror() { reader.classList.toggle('mirror', mirrorOn()); }
+
+  const camSelect = h('select', { title: 'Pilih kamera', 'aria-label': 'Pilih kamera', style: { maxWidth: '260px', flex: '0 1 240px' }, onchange: async () => {
+    const i = Number(camSelect.value);
+    if (!cameras[i]) return;
+    camIndex = i;
+    localStorage.setItem('camera-id', cameras[i].id);
+    if (running) { await stopCamera(true); startCamera(); } else applyMirror();
+  } });
+  const mirrorSw = h('input', { type: 'checkbox', onchange: () => { localStorage.setItem('camera-mirror', mirrorSw.checked ? '1' : '0'); applyMirror(); } });
+  const mirrorEl = h('label', { class: 'switch', title: 'Balik tampilan kamera seperti cermin (tidak memengaruhi pembacaan QR)' }, mirrorSw, h('span', { class: 'track' }), h('span', null, 'Mirror'));
+
+  function fillCamSelect() {
+    camSelect.replaceChildren(...(cameras.length
+      ? cameras.map((c, i) => h('option', { value: String(i) }, '📷 ' + camLabel(c, i)))
+      : [h('option', { value: '' }, 'Kamera belum terdeteksi')]));
+    camSelect.value = cameras.length ? String(camIndex) : '';
+    camSelect.disabled = cameras.length < 2;
+    mirrorSw.checked = mirrorOn();
+  }
+
   function renderCamBtns() {
+    fillCamSelect();
     camBtns.replaceChildren(
-      running ? h('button', { class: 'btn', onclick: stopCamera }, '⏹ Matikan kamera') : h('button', { class: 'btn primary', onclick: () => startCamera() }, '▶ Nyalakan kamera'),
-      running && cameras.length > 1 ? h('button', { class: 'btn', onclick: switchCamera }, '🔄 Ganti kamera') : null);
+      running ? h('button', { class: 'btn', onclick: () => stopCamera() }, '⏹ Matikan kamera') : h('button', { class: 'btn primary', onclick: () => startCamera() }, '▶ Nyalakan kamera'),
+      cameras.length > 1 ? h('button', { class: 'btn', onclick: switchCamera, title: 'Pindah ke kamera berikutnya' }, '🔄 Ganti kamera') : null,
+      camSelect,
+      mirrorEl,
+      h('button', { class: 'btn sm ghost', title: 'Deteksi ulang kamera (mis. setelah mencolok webcam USB)', onclick: async () => { await listCameras(true); renderCamBtns(); toast(`${cameras.length} kamera terdeteksi`, cameras.length ? 'ok' : 'warn'); } }, '↻'));
   }
 
   // ---------- suara & getar ----------
@@ -222,42 +257,104 @@ export default async function scanner(root, { params }) {
   }
 
   // ---------- kamera ----------
+  async function listCameras(force = false) {
+    if (cameras.length && !force) return cameras;
+    const Html5Qrcode = await loadScanner();
+    try { cameras = await Html5Qrcode.getCameras(); } catch (e) { cameras = []; }
+    // beri jeda agar webcam benar-benar dilepas sebelum dibuka lagi (mencegah 'Timeout starting video source')
+    await new Promise((r) => setTimeout(r, 400));
+    const saved = localStorage.getItem('camera-id');
+    const idx = cameras.findIndex((c) => c.id === saved);
+    if (idx >= 0) camIndex = idx;
+    else {
+      // utamakan kamera belakang di HP
+      const back = cameras.findIndex((c) => /back|rear|belakang|environment/i.test(c.label || ''));
+      camIndex = back >= 0 ? back : 0;
+    }
+    return cameras;
+  }
+
+  async function resetScanner() {
+    try { if (qr) await qr.stop(); } catch (e) { /* belum berjalan */ }
+    try { if (qr) qr.clear(); } catch (e) { /* */ }
+    qr = null;
+    reader.replaceChildren();
+  }
+
+  function cameraErrorText(e) {
+    const m = String(e?.name || '') + ' ' + String(e?.message || e || '');
+    if (/NotAllowed|Permission/i.test(m)) return ['Izin kamera ditolak.', 'Klik ikon gembok/kamera di samping alamat situs → izinkan Kamera, lalu muat ulang halaman.'];
+    if (/NotFound|DevicesNotFound|no camera/i.test(m)) return ['Kamera tidak ditemukan.', 'Pastikan webcam terpasang/aktif, lalu klik ↻ untuk mendeteksi ulang.'];
+    if (/Timeout|NotReadable|TrackStart|Could not start|in use|AbortError/i.test(m)) return ['Kamera sedang dipakai aplikasi lain atau gagal merespons.',
+      'Tutup aplikasi yang memakai kamera (Zoom, Teams, Google Meet, WhatsApp, aplikasi Kamera, tab browser lain), lalu klik Coba lagi. Bisa juga pilih kamera lain dari daftar. Di Windows: Settings → Privacy & security → Camera → izinkan akses untuk browser.'];
+    if (/Overconstrained/i.test(m)) return ['Kamera tidak mendukung pengaturan ini.', 'Pilih kamera lain dari daftar.'];
+    return ['Kamera tidak dapat dinyalakan.', String(e?.message || e)];
+  }
+
   async function startCamera() {
+    placeholder.classList.remove('hidden');
     placeholder.replaceChildren(h('div', { class: 'spinner' }), h('div', null, 'Menyalakan kamera…'));
+    let lastErr = null;
     try {
       audio = audio || new (window.AudioContext || window.webkitAudioContext)();
       const Html5Qrcode = await loadScanner();
-      if (!qr) qr = new Html5Qrcode('reader', { verbose: false, experimentalFeatures: { useBarCodeDetectorIfSupported: true } });
-      try { cameras = await Html5Qrcode.getCameras(); } catch (e) { cameras = []; }
-      const saved = localStorage.getItem('camera-id');
-      const idx = cameras.findIndex((c) => c.id === saved);
-      if (idx >= 0) camIndex = idx;
-      const source = idx >= 0 ? cameras[idx].id : { facingMode: 'environment' };
-      await qr.start(source, {
-        fps: 15,
-        qrbox: (w, hh) => { const s = Math.floor(Math.min(w, hh) * 0.72); return { width: s, height: s }; },
-        aspectRatio: 1,
-        disableFlip: false,
-      }, (text) => { if (!busy) handleCode(text); }, () => {});
-      running = true;
-      placeholder.classList.add('hidden');
-      requestWakeLock();
-    } catch (e) {
-      running = false;
-      placeholder.classList.remove('hidden');
-      placeholder.replaceChildren(h('div', { style: { fontSize: '2.5rem' } }, '🚫'),
-        h('div', null, /Permission|NotAllowed/i.test(String(e)) ? 'Izin kamera ditolak. Izinkan akses kamera di pengaturan browser.' : 'Kamera tidak dapat dinyalakan: ' + (e?.message || e)),
-        h('div', { class: 'small' }, 'Pastikan situs dibuka lewat HTTPS. Anda tetap bisa memakai pencarian manual atau scanner USB.'),
-        h('button', { class: 'btn primary', onclick: () => startCamera() }, 'Coba lagi'));
-    }
+      await listCameras();
+      // urutan percobaan: kamera terpilih → kamera lain → mode umum
+      const attempts = [];
+      if (cameras[camIndex]) attempts.push({ src: cameras[camIndex].id, idx: camIndex });
+      cameras.forEach((c, i) => { if (i !== camIndex) attempts.push({ src: c.id, idx: i }); });
+      attempts.push({ src: { facingMode: 'environment' }, idx: -1 }, { src: { facingMode: 'user' }, idx: -1 });
+
+      for (const [n, at] of attempts.entries()) {
+        if (n > 0) placeholder.replaceChildren(h('div', { class: 'spinner' }), h('div', null, `Mencoba kamera lain (${n + 1}/${attempts.length})…`));
+        await resetScanner();
+        qr = new Html5Qrcode('reader', { verbose: false, experimentalFeatures: { useBarCodeDetectorIfSupported: true } });
+        try {
+          await qr.start(at.src, {
+            fps: 15,
+            qrbox: (w, hh) => { const s = Math.floor(Math.min(w, hh) * 0.72); return { width: s, height: s }; },
+            aspectRatio: 1,
+            disableFlip: false,
+          }, (text) => { if (!busy) handleCode(text); }, () => {});
+          if (at.idx >= 0) {
+            if (at.idx !== camIndex) toast(`Memakai ${camLabel(cameras[at.idx], at.idx)}`, 'warn');
+            camIndex = at.idx;
+            localStorage.setItem('camera-id', cameras[at.idx].id);
+          }
+          running = true;
+          placeholder.classList.add('hidden');
+          applyMirror();
+          requestWakeLock();
+          if (!cameras.length) { await listCameras(true); }
+          renderCamBtns();
+          return;
+        } catch (e) {
+          lastErr = e;
+          console.warn('Kamera gagal:', at.src, e);
+          if (/NotAllowed|Permission/i.test(String(e?.name || '') + String(e?.message || e))) break; // izin ditolak: percuma mencoba lainnya
+        }
+      }
+    } catch (e) { lastErr = e; }
+
+    await resetScanner();
+    running = false;
+    const [title, hint] = cameraErrorText(lastErr);
+    placeholder.classList.remove('hidden');
+    placeholder.replaceChildren(h('div', { style: { fontSize: '2.5rem' } }, '🚫'),
+      h('div', { style: { fontWeight: 700 } }, title),
+      h('div', { class: 'small', style: { maxWidth: '520px' } }, hint),
+      h('div', { class: 'small', style: { opacity: .7 } }, 'Sementara itu Anda tetap bisa memakai pencarian manual atau scanner barcode USB.'),
+      h('button', { class: 'btn primary', onclick: () => startCamera() }, 'Coba lagi'));
     renderCamBtns();
   }
 
-  async function stopCamera() {
-    try { if (qr && running) await qr.stop(); } catch (e) { /* */ }
+  async function stopCamera(silent = false) {
+    await resetScanner();
     running = false;
-    placeholder.classList.remove('hidden');
-    placeholder.replaceChildren(h('div', { style: { fontSize: '3rem' } }, '📷'), h('button', { class: 'btn primary lg', onclick: () => startCamera() }, 'Mulai scan'));
+    if (!silent) {
+      placeholder.classList.remove('hidden');
+      placeholder.replaceChildren(h('div', { style: { fontSize: '3rem' } }, '📷'), h('button', { class: 'btn primary lg', onclick: () => startCamera() }, 'Mulai scan'));
+    }
     renderCamBtns();
   }
 
@@ -265,7 +362,7 @@ export default async function scanner(root, { params }) {
     if (cameras.length < 2) return;
     camIndex = (camIndex + 1) % cameras.length;
     localStorage.setItem('camera-id', cameras[camIndex].id);
-    await stopCamera();
+    await stopCamera(true);
     startCamera();
   }
 
