@@ -262,9 +262,17 @@ td.actions { white-space: nowrap; text-align: right; }
 .scan-counter .big { font-size: 1.4rem; }
 .scan-body { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 1rem; padding: 1rem; flex: 1; }
 @media (max-width: 900px) { .scan-body { grid-template-columns: 1fr; padding: .6rem; } }
-.cam-wrap { position: relative; background: #000; border-radius: 16px; overflow: hidden; aspect-ratio: 1 / 1; max-height: 72vh; width: 100%; margin: 0 auto; }
-.cam-wrap #reader { width: 100%; height: 100%; }
-.cam-wrap #reader video { object-fit: cover; width: 100% !important; height: 100% !important; }
+.cam-wrap { position: relative; background: #000; border-radius: 16px; overflow: hidden; width: 100%; margin: 0 auto; min-height: 260px; }
+/* Tampilan asli: video mengikuti rasio kamera, tidak ditarik / dipotong */
+.cam-wrap.fit-asli { min-height: 0; }
+.cam-wrap.fit-asli #reader { width: 100%; }
+.cam-wrap.fit-asli #reader video { display: block; width: 100% !important; height: auto !important; object-fit: contain; }
+/* Kotak penuh: area persegi, gambar dipotong (mode lama) */
+.cam-wrap.fit-penuh { aspect-ratio: 1 / 1; max-height: 72vh; max-width: 72vh; }
+.cam-wrap.fit-penuh #reader { width: 100%; height: 100%; }
+.cam-wrap.fit-penuh #reader video { object-fit: cover; width: 100% !important; height: 100% !important; }
+/* Sebelum kamera menyala */
+.cam-wrap:not(.fit-asli):not(.fit-penuh) { aspect-ratio: 16 / 9; max-height: 72vh; }
 .cam-placeholder { position: absolute; inset: 0; display: flex; flex-direction: column; gap: .75rem; align-items: center; justify-content: center; color: #cbd5e1; text-align: center; padding: 1rem; }
 .scan-overlay { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: #fff; padding: 1rem; animation: fade .12s; z-index: 5; }
 .scan-overlay.ok { background: rgba(22,163,74,.93); }
