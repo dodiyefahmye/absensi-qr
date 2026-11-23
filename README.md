@@ -22,6 +22,7 @@ dengan **GitHub Pages** + **Supabase**.
 | **Offline** | Scan tetap jalan saat internet putus, lalu disinkronkan otomatis saat online kembali |
 | **Anti titip absen** | QR acara bisa berganti tiap X detik, dibatasi 1 kali per perangkat, dan dicegah ganda berdasarkan NIP/email |
 | **Peserta** | Input manual, import Excel/CSV, e-ticket PNG, unduh semua e-ticket (ZIP), kirim via WhatsApp/email |
+| **Desain kartu** | Kartu potret/lanskap, pilih data peserta yang dicetak (NIM, fakultas, dll.), foto peserta, teks tambahan, cetak semua kartu ke PDF A4 |
 | **Layar tampilan** | Mode kiosk/proyektor: QR besar, jumlah hadir raksasa, "Selamat datang, [nama]!" |
 | **Laporan** | Statistik, grafik kedatangan per jam, per kategori, per meja dan per operator. Ekspor **Excel**, **CSV**, **PDF** (dengan kop logo & tanda tangan) |
 | **Lainnya** | PWA (bisa di-install di HP), mode gelap, Bahasa Indonesia, responsif |
