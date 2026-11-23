@@ -40,6 +40,17 @@ export const loadJSZip = () => once('jszip', async () => (await import(CDN.jszip
 export const loadSortable = () => once('sortable', async () => (await import(CDN.sortable)).default);
 export const loadPDF = () => once('pdf', async () => {
   const m = await import(CDN.jspdf);
+  const jsPDF = m.jsPDF || m.default?.jsPDF || m.default;
   const at = await import(CDN.autotable);
-  return { jsPDF: m.jsPDF || m.default, autoTable: at.default || at.autoTable };
+  // Bentuk ekspor jspdf-autotable berbeda-beda antar build CDN, jadi cari fungsinya dengan aman.
+  let fn = [at.autoTable, at.default, at.default?.autoTable, at.default?.default].find((f) => typeof f === 'function');
+  if (!fn) {
+    const apply = [at.applyPlugin, at.default?.applyPlugin].find((f) => typeof f === 'function');
+    if (apply) apply(jsPDF);
+    fn = (doc, opts) => {
+      if (typeof doc.autoTable !== 'function') throw new Error('Library tabel PDF gagal dimuat. Muat ulang halaman lalu coba lagi.');
+      return doc.autoTable(opts);
+    };
+  }
+  return { jsPDF, autoTable: fn };
 });
