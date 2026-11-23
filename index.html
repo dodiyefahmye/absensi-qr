@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Absensi QR</title>
+  <meta name="description" content="Aplikasi absensi kegiatan berbasis QR Code, multi-perangkat dan realtime." />
+  <meta name="theme-color" content="#1d4ed8" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="assets/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="assets/icon-192.png" />
+  <link rel="stylesheet" href="css/app.css" />
+  <script src="config.js"></script>
+  <script>
+    try {
+      const t = localStorage.getItem('ui-theme');
+      if (t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches)) {
+        document.documentElement.dataset.theme = 'dark';
+      }
+    } catch (e) {}
+  </script>
+</head>
+<body>
+  <div id="app"><div class="boot"><div class="spinner"></div><p>Memuat aplikasi…</p></div></div>
+  <div id="toasts" aria-live="polite"></div>
+  <noscript>Aplikasi ini membutuhkan JavaScript.</noscript>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
