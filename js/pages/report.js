@@ -43,6 +43,7 @@ export default async function report(root, { params }) {
       h('div', null, h('h1', { style: { margin: 0 } }, 'Laporan: ' + ev.name),
         h('div', { class: 'muted small' }, [ev.event_date ? fmtDate(ev.event_date) : '', ev.location].filter(Boolean).join(' · '), ' ', h('span', { class: 'badge ok' }, '● Realtime'))),
       h('div', { class: 'row no-print' },
+        h('a', { class: 'btn', href: `#/event/${ev.id}/monitor` }, '📈 Monitor'),
         h('button', { class: 'btn', onclick: exportExcel }, '⬇ Excel'),
         h('button', { class: 'btn', onclick: exportCSV }, '⬇ CSV'),
         h('button', { class: 'btn', onclick: exportPDF }, '⬇ PDF'),

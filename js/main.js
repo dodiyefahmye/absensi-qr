@@ -10,6 +10,7 @@ const routes = [
   { path: '/event/:id/scan', load: () => import('./pages/scanner.js'), bare: true },
   { path: '/event/:id/display', load: () => import('./pages/display.js'), bare: true },
   { path: '/event/:id/report', load: () => import('./pages/report.js') },
+  { path: '/event/:id/monitor', load: () => import('./pages/monitor.js'), bare: true },
   { path: '/event/:id', load: () => import('./pages/editor.js') },
   { path: '/', load: () => import('./pages/dashboard.js') },
 ];

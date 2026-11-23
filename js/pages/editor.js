@@ -35,6 +35,7 @@ export default async function editor(root, { params, query }) {
   const quick = () => h('div', { class: 'row' },
     ev.mode === 'participant_qr' ? h('a', { class: 'btn sm primary', href: `#/event/${ev.id}/scan` }, '📷 Scanner') : null,
     h('a', { class: 'btn sm', href: `#/event/${ev.id}/display` }, '🖥️ Layar tampilan'),
+    h('a', { class: 'btn sm', href: `#/event/${ev.id}/monitor` }, '📈 Monitor'),
     h('a', { class: 'btn sm', href: `#/event/${ev.id}/report` }, '📊 Laporan'),
     ev.mode === 'event_qr' ? h('button', { class: 'btn sm', onclick: () => copyText(publicFormUrl(ev.public_token)) }, '🔗 Salin link formulir') : null);
   const quickBox = h('div');

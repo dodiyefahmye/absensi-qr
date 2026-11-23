@@ -62,6 +62,7 @@ export default async function dashboard(root) {
         canEdit ? h('a', { class: 'btn sm primary', href: `#/event/${ev.id}` }, '⚙️ Kelola') : null,
         ev.mode === 'participant_qr' ? h('a', { class: 'btn sm', href: `#/event/${ev.id}/scan` }, '📷 Scan') : null,
         h('a', { class: 'btn sm', href: `#/event/${ev.id}/display` }, '🖥️ Layar'),
+        h('a', { class: 'btn sm', href: `#/event/${ev.id}/monitor` }, '📈 Monitor'),
         h('a', { class: 'btn sm', href: `#/event/${ev.id}/report` }, '📊 Laporan')));
   }
 

@@ -85,6 +85,7 @@ export default async function scanner(root, { params }) {
       h('a', { class: 'btn sm', href: '#/', title: 'Kembali' }, '←'),
       theme.logo_url ? h('img', { src: theme.logo_url, alt: '' }) : null,
       h('div', { class: 'title', style: { flex: 1, minWidth: 0 } }, ev.name, h('div', { class: 'small', style: { opacity: .85, fontWeight: 500 } }, 'Scanner absensi')),
+      h('a', { class: 'btn sm', href: `#/event/${ev.id}/monitor`, title: 'Monitor kehadiran per kategori' }, '📈'),
       h('button', { class: 'btn sm', title: 'Layar penuh', onclick: () => document.fullscreenElement ? document.exitFullscreen() : page.requestFullscreen?.() }, '⛶')),
     h('div', { class: 'scan-counter' },
       h('span', null, 'Hadir'), countEl,
