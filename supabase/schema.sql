@@ -432,10 +432,20 @@ begin
 end $$;
 
 -- 5e. E-ticket publik (siapa pun yang memegang token tiket)
+--     Hanya data yang dipilih di desain kartu (theme.ticket.fields / photo_field) yang dikirim.
 create or replace function public.get_ticket(p_qr_token text)
 returns jsonb language sql stable security definer set search_path = public as $$
   select jsonb_build_object(
-    'participant', jsonb_build_object('name', p.name, 'category', p.category, 'qr_token', p.qr_token),
+    'participant', jsonb_build_object(
+      'name', p.name, 'category', p.category, 'qr_token', p.qr_token,
+      'email', case when coalesce(e.theme->'ticket'->'fields', '[]'::jsonb) ? '_email' then p.email end,
+      'phone', case when coalesce(e.theme->'ticket'->'fields', '[]'::jsonb) ? '_phone' then p.phone end,
+      'data', coalesce((
+        select jsonb_object_agg(d.key, d.value) from jsonb_each(p.data) d
+        where coalesce(e.theme->'ticket'->'fields', '[]'::jsonb) ? d.key
+           or d.key = e.theme->'ticket'->>'photo_field'
+      ), '{}'::jsonb)
+    ),
     'event', public.safe_event_json(e),
     'checked_in_at', (select a.checked_in_at from public.attendances a
                       where a.event_id = e.id and a.participant_id = p.id)

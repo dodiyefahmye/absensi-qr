@@ -3,8 +3,8 @@ const VERSION = 'absensi-qr-v1';
 const SHELL = [
   './', './index.html', './config.js', './css/app.css', './manifest.webmanifest', './assets/icon.svg',
   './js/main.js', './js/lib/api.js', './js/lib/ui.js', './js/lib/vendor.js', './js/lib/theme.js', './js/lib/form.js',
-  './js/lib/qr.js', './js/lib/offline.js', './js/lib/exporter.js',
-  './js/components/form-builder.js', './js/components/participants.js',
+  './js/lib/qr.js', './js/lib/ticket.js', './js/lib/offline.js', './js/lib/exporter.js',
+  './js/components/form-builder.js', './js/components/participants.js', './js/components/ticket-designer.js',
   './js/pages/login.js', './js/pages/dashboard.js', './js/pages/editor.js', './js/pages/scanner.js',
   './js/pages/display.js', './js/pages/report.js', './js/pages/public-form.js', './js/pages/ticket.js', './js/pages/join.js',
 ];

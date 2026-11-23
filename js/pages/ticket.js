@@ -2,7 +2,8 @@
 import * as api from '../lib/api.js';
 import { h, errMsg, fmtTime, downloadBlob } from '../lib/ui.js';
 import { applyTheme } from '../lib/theme.js';
-import { renderTicket, safeFileName } from '../lib/qr.js';
+import { safeFileName } from '../lib/qr.js';
+import { renderTicket } from '../lib/ticket.js';
 
 export default async function ticket(root, { params }) {
   const page = h('div', { style: { padding: '1.5rem 1rem' } });

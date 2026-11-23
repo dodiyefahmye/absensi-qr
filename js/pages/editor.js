@@ -3,12 +3,13 @@ import { h, toast, modal, errMsg, navigate, spinner, confirmDialog, switchEl, co
 import { normalizeTheme, FONTS, DEFAULT_THEME, applyTheme, contrastInk } from '../lib/theme.js';
 import { formBuilder } from '../components/form-builder.js';
 import { participantsTab } from '../components/participants.js';
+import { ticketDesignerTab } from '../components/ticket-designer.js';
 import { renderForm } from '../lib/form.js';
 import { drawQR, joinUrl, publicFormUrl } from '../lib/qr.js';
 
 const TABS = [
   ['info', '📄 Info'], ['branding', '🎨 Tampilan'], ['form', '🧾 Formulir'],
-  ['peserta', '👥 Peserta'], ['operator', '📱 Operator'], ['settings', '⚙️ Pengaturan'],
+  ['peserta', '👥 Peserta'], ['kartu', '🎫 Kartu'], ['operator', '📱 Operator'], ['settings', '⚙️ Pengaturan'],
 ];
 
 export default async function editor(root, { params, query }) {
@@ -59,7 +60,7 @@ export default async function editor(root, { params, query }) {
     if (tabCleanup) { try { tabCleanup(); } catch (e) { /* */ } tabCleanup = null; }
     tabsEl.replaceChildren(...TABS.map(([k, l]) => h('button', { class: k === tab ? 'active' : '', role: 'tab', onclick: () => show(k) }, l)));
     body.replaceChildren();
-    const fn = { info: infoTab, branding: brandingTab, form: formTab, peserta: participantsTab, operator: operatorTab, settings: settingsTab }[tab];
+    const fn = { info: infoTab, branding: brandingTab, form: formTab, peserta: participantsTab, kartu: ticketDesignerTab, operator: operatorTab, settings: settingsTab }[tab];
     const r = fn(body, ctx);
     if (typeof r === 'function') tabCleanup = r;
   }

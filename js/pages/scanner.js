@@ -61,7 +61,17 @@ export default async function scanner(root, { params }) {
     h('button', { class: 'btn primary lg', onclick: () => startCamera() }, 'Mulai scan'),
     h('div', { class: 'small' }, 'Scanner barcode USB/Bluetooth juga didukung — langsung scan saja.'));
   const overlay = h('div', { class: 'scan-overlay hidden', onclick: hideOverlay });
-  const camWrap = h('div', { class: 'cam-wrap' }, reader, placeholder, overlay);
+  // penanda area scan: selalu persegi, mengikuti ukuran tampilan kamera
+  const guide = h('div', { class: 'scan-guide hidden', 'aria-hidden': 'true' },
+    h('span', { class: 'c tl' }), h('span', { class: 'c tr' }), h('span', { class: 'c bl' }), h('span', { class: 'c br' }), h('span', { class: 'line' }));
+  const camWrap = h('div', { class: 'cam-wrap' }, reader, guide, placeholder, overlay);
+  function sizeGuide() {
+    const r = camWrap.getBoundingClientRect();
+    const side = Math.round(Math.min(r.width, r.height) * 0.62);
+    guide.style.width = guide.style.height = side + 'px';
+  }
+  const guideRO = 'ResizeObserver' in window ? new ResizeObserver(sizeGuide) : null;
+  if (guideRO) guideRO.observe(camWrap); else window.addEventListener('resize', sizeGuide);
   const camBtns = h('div', { class: 'row', style: { justifyContent: 'center', marginTop: '.6rem' } });
   const resInfo = h('span', { class: 'small', style: { opacity: .7 }, title: 'Resolusi yang benar-benar diberikan kamera' });
   const camOpts = h('div', { class: 'row', style: { justifyContent: 'center', marginTop: '.5rem' } });
@@ -380,8 +390,7 @@ export default async function scanner(root, { params }) {
         qr = new Html5Qrcode('reader', { verbose: false, experimentalFeatures: { useBarCodeDetectorIfSupported: true } });
         try {
           await qr.start(at.src, {
-            fps: 15,
-            qrbox: (w, hh) => { const s = Math.floor(Math.min(w, hh) * 0.7); return { width: s, height: s }; },
+            fps: 12,
             disableFlip: false,
             videoConstraints: videoConstraintsFor(at.src),
           }, (text) => { if (!busy) handleCode(text); }, () => {});
@@ -394,6 +403,7 @@ export default async function scanner(root, { params }) {
           placeholder.classList.add('hidden');
           applyMirror();
           await afterStart();
+          guide.classList.remove('hidden'); sizeGuide();
           requestWakeLock();
           if (!cameras.length) { await listCameras(true); }
           renderCamBtns();
@@ -408,6 +418,7 @@ export default async function scanner(root, { params }) {
 
     await resetScanner();
     running = false;
+    guide.classList.add('hidden');
     const [title, hint] = cameraErrorText(lastErr);
     placeholder.classList.remove('hidden');
     placeholder.replaceChildren(h('div', { style: { fontSize: '2.5rem' } }, '🚫'),
@@ -421,6 +432,7 @@ export default async function scanner(root, { params }) {
   async function stopCamera(silent = false) {
     await resetScanner();
     running = false;
+    guide.classList.add('hidden');
     caps.zoom = null; caps.torch = false;
     camWrap.style.maxWidth = '';
     camWrap.classList.remove('fit-asli', 'fit-penuh');
@@ -514,6 +526,7 @@ export default async function scanner(root, { params }) {
   if (localStorage.getItem('scan-autostart') === '1') startCamera();
 
   return () => {
+    if (guideRO) guideRO.disconnect(); else window.removeEventListener('resize', sizeGuide);
     unsub();
     clearInterval(flushTimer); clearTimeout(overlayTimer);
     window.removeEventListener('online', onOnline);

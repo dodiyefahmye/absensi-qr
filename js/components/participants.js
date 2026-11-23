@@ -2,7 +2,8 @@
 import * as api from '../lib/api.js';
 import { h, toast, modal, errMsg, spinner, confirmDialog, copyText, debounce, fmtTime, downloadBlob } from '../lib/ui.js';
 import { renderForm, displayValue } from '../lib/form.js';
-import { renderTicket, ticketUrl, safeFileName } from '../lib/qr.js';
+import { ticketUrl, safeFileName } from '../lib/qr.js';
+import { renderTicket, ticketsToPDF } from '../lib/ticket.js';
 import { categoryColor, contrastInk } from '../lib/theme.js';
 import { toExcel, readSpreadsheet } from '../lib/exporter.js';
 import { loadJSZip } from '../lib/vendor.js';
@@ -161,6 +162,17 @@ export function participantsTab(body, { ev }) {
     } catch (e) { m.close(); toast(errMsg(e), 'err'); }
   }
 
+  async function printCards() {
+    const list = filtered();
+    if (!list.length) return toast('Tidak ada peserta', 'warn');
+    const prog = h('div', null, 'Menyiapkan…');
+    const m = modal({ title: 'Membuat PDF kartu', body: prog });
+    try {
+      await ticketsToPDF(list, ev, `kartu_${safeFileName(ev.name)}.pdf`, (d, t) => { prog.textContent = `Membuat kartu ${d} dari ${t}…`; });
+      m.close();
+    } catch (e) { m.close(); toast(errMsg(e), 'err'); }
+  }
+
   function templateColumns() {
     return ['Nama', 'Kategori', 'Email', 'No HP', ...extraFields.filter((f) => !['email', 'tel'].includes(f.type)).map((f) => f.label)];
   }
@@ -241,6 +253,8 @@ export function participantsTab(body, { ev }) {
     modal({
       title: 'Tindakan lain',
       body: h('div', { class: 'stack' },
+        h('button', { class: 'btn block', onclick: printCards }, '🖨 Cetak kartu peserta (PDF A4)'),
+        h('a', { class: 'btn block', href: `#/event/${ev.id}?tab=kartu` }, '🎫 Ubah desain kartu'),
         h('button', { class: 'btn block', onclick: downloadTemplate }, '⬇ Unduh template Excel'),
         h('button', { class: 'btn block', onclick: async () => {
           const rows = people.map((p) => ({ Nama: p.name, Kategori: p.category || '', Email: p.email || '', 'No HP': p.phone || '',

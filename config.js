@@ -12,7 +12,7 @@
 //  saat deploy (lihat .github/workflows/deploy.yml).
 // =====================================================================
 window.APP_CONFIG = {
-  SUPABASE_URL: 'https://fkgecwhtaaqoqlgxohgi.supabase.co',
-  SUPABASE_ANON_KEY: 'sb_publishable_sTsz9pK4YuihyPYKcoIRag_SaBNXNgJ',
+  SUPABASE_URL: '',
+  SUPABASE_ANON_KEY: '',
   APP_NAME: 'Absensi QR',
 };
