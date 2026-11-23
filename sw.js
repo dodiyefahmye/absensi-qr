@@ -1,5 +1,5 @@
 // Service worker: cache app shell & library CDN agar bisa dibuka saat offline.
-const VERSION = 'absensi-qr-v1';
+const VERSION = 'absensi-qr-v3';
 const SHELL = [
   './', './index.html', './config.js', './css/app.css', './manifest.webmanifest', './assets/icon.svg',
   './js/main.js', './js/lib/api.js', './js/lib/ui.js', './js/lib/vendor.js', './js/lib/theme.js', './js/lib/form.js',
@@ -34,7 +34,8 @@ self.addEventListener('fetch', (e) => {
 
   // File aplikasi sendiri: network-first, fallback ke cache saat offline
   if (url.origin === self.location.origin) {
-    e.respondWith(fetch(req).then((res) => {
+    // cache: 'no-cache' → selalu cek ke server dulu, sehingga versi baru langsung terpakai setelah deploy
+    e.respondWith(fetch(req, { cache: 'no-cache' }).then((res) => {
       if (res.ok) { const copy = res.clone(); caches.open(VERSION).then((c) => c.put(req, copy)); }
       return res;
     }).catch(() => caches.match(req, { ignoreSearch: true }).then((hit) => hit || caches.match('./index.html'))));
