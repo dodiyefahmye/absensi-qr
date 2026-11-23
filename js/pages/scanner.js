@@ -63,6 +63,8 @@ export default async function scanner(root, { params }) {
   const overlay = h('div', { class: 'scan-overlay hidden', onclick: hideOverlay });
   const camWrap = h('div', { class: 'cam-wrap' }, reader, placeholder, overlay);
   const camBtns = h('div', { class: 'row', style: { justifyContent: 'center', marginTop: '.6rem' } });
+  const resInfo = h('span', { class: 'small', style: { opacity: .7 }, title: 'Resolusi yang benar-benar diberikan kamera' });
+  const camOpts = h('div', { class: 'row', style: { justifyContent: 'center', marginTop: '.5rem' } });
 
   const search = h('input', { type: 'search', placeholder: 'Cari nama peserta…', autocomplete: 'off' });
   const results = h('div', { class: 'search-results' });
@@ -79,7 +81,7 @@ export default async function scanner(root, { params }) {
       h('span', { class: 'spacer' }),
       h('span', { class: 'row', style: { gap: '.35rem' } }, liveDot, liveTxt), pendingEl, sessEl, labelIn),
     h('div', { class: 'scan-body' },
-      h('div', null, camWrap, camBtns),
+      h('div', null, camWrap, camBtns, camOpts),
       h('div', { class: 'scan-side' },
         h('div', { class: 'card' }, h('h3', null, 'Cari manual'), search, results),
         h('div', { class: 'card' }, h('h3', null, 'Terakhir masuk'), recentList))));
@@ -256,6 +258,73 @@ export default async function scanner(root, { params }) {
     } finally { flushing = false; updatePending(); }
   }
 
+
+  // ---------- kualitas & tampilan kamera ----------
+  const RES = {
+    sd:  { label: 'Hemat (640×480)', width: 640, height: 480 },
+    hd:  { label: 'HD (1280×720)', width: 1280, height: 720 },
+    fhd: { label: 'Full HD (1920×1080)', width: 1920, height: 1080 },
+  };
+  const getRes = () => (RES[localStorage.getItem('camera-res')] ? localStorage.getItem('camera-res') : 'hd');
+  const getFit = () => localStorage.getItem('camera-fit') || 'asli'; // asli = rasio asli tanpa potong, penuh = kotak (dipotong)
+  function videoConstraintsFor(src) {
+    const r = RES[getRes()];
+    const base = { width: { ideal: r.width }, height: { ideal: r.height } };
+    return typeof src === 'string' ? { ...base, deviceId: { exact: src } } : { ...base, ...src };
+  }
+  const caps = { zoom: null, torch: false };
+  let torchOn = false;
+  async function afterStart() {
+    const v = reader.querySelector('video');
+    // tunggu dimensi video tersedia
+    for (let i = 0; i < 20 && v && !v.videoWidth; i++) await new Promise((r) => setTimeout(r, 50));
+    applyFit();
+    caps.zoom = null; caps.torch = false; torchOn = false;
+    try {
+      const c = qr.getRunningTrackCapabilities ? qr.getRunningTrackCapabilities() : {};
+      if (c.zoom && c.zoom.max > c.zoom.min) caps.zoom = c.zoom;
+      caps.torch = !!c.torch;
+      if (Array.isArray(c.focusMode) && c.focusMode.includes('continuous')) {
+        await qr.applyVideoConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {});
+      }
+    } catch (e) { /* kamera tidak mendukung */ }
+    renderCamOpts();
+  }
+  function applyFit() {
+    const v = reader.querySelector('video');
+    const fit = getFit();
+    camWrap.classList.toggle('fit-penuh', fit === 'penuh');
+    camWrap.classList.toggle('fit-asli', fit !== 'penuh');
+    if (v && v.videoWidth && fit !== 'penuh') {
+      // batasi lebar agar tinggi video ≤ 70% layar tanpa memotong gambar
+      camWrap.style.maxWidth = `min(100%, calc(70vh * ${(v.videoWidth / v.videoHeight).toFixed(3)}))`;
+    } else camWrap.style.maxWidth = '';
+    resInfo.textContent = v && v.videoWidth ? `${v.videoWidth}×${v.videoHeight}` : '';
+  }
+  async function restartCamera() { if (running) { await stopCamera(true); startCamera(); } }
+
+  const resSel = h('select', { title: 'Resolusi kamera', 'aria-label': 'Resolusi kamera', style: { flex: '0 1 200px' }, onchange: () => { localStorage.setItem('camera-res', resSel.value); restartCamera(); } },
+    Object.entries(RES).map(([k, r]) => h('option', { value: k }, '🎞 ' + r.label)));
+  const fitSel = h('select', { title: 'Tampilan kamera', 'aria-label': 'Tampilan kamera', style: { flex: '0 1 220px' }, onchange: () => { localStorage.setItem('camera-fit', fitSel.value); applyFit(); restartCamera(); } },
+    h('option', { value: 'asli' }, '🖼 Tampilan asli (tanpa potong)'), h('option', { value: 'penuh' }, '⬛ Kotak penuh (dipotong)'));
+  function renderCamOpts() {
+    resSel.value = getRes(); fitSel.value = getFit();
+    let zoomEl = null;
+    if (running && caps.zoom) {
+      const z = caps.zoom;
+      const range = h('input', { type: 'range', min: z.min, max: z.max, step: z.step || 0.1, value: Number(localStorage.getItem('camera-zoom')) || z.min, style: { width: '140px' },
+        oninput: () => { localStorage.setItem('camera-zoom', range.value); qr.applyVideoConstraints({ advanced: [{ zoom: Number(range.value) }] }).catch(() => {}); } });
+      if (localStorage.getItem('camera-zoom')) qr.applyVideoConstraints({ advanced: [{ zoom: Number(range.value) }] }).catch(() => {});
+      zoomEl = h('label', { class: 'row small', style: { gap: '.4rem', flex: '0 0 auto' } }, '🔍 Zoom', range);
+    }
+    const torchEl = running && caps.torch ? h('button', { class: 'btn sm', onclick: async () => {
+      torchOn = !torchOn;
+      try { await qr.applyVideoConstraints({ advanced: [{ torch: torchOn }] }); } catch (e) { torchOn = false; toast('Senter tidak dapat dinyalakan', 'warn'); }
+      renderCamOpts();
+    } }, torchOn ? '🔦 Senter: nyala' : '🔦 Senter') : null;
+    camOpts.replaceChildren(resSel, fitSel, zoomEl, torchEl, resInfo);
+  }
+
   // ---------- kamera ----------
   async function listCameras(force = false) {
     if (cameras.length && !force) return cameras;
@@ -312,9 +381,9 @@ export default async function scanner(root, { params }) {
         try {
           await qr.start(at.src, {
             fps: 15,
-            qrbox: (w, hh) => { const s = Math.floor(Math.min(w, hh) * 0.72); return { width: s, height: s }; },
-            aspectRatio: 1,
+            qrbox: (w, hh) => { const s = Math.floor(Math.min(w, hh) * 0.7); return { width: s, height: s }; },
             disableFlip: false,
+            videoConstraints: videoConstraintsFor(at.src),
           }, (text) => { if (!busy) handleCode(text); }, () => {});
           if (at.idx >= 0) {
             if (at.idx !== camIndex) toast(`Memakai ${camLabel(cameras[at.idx], at.idx)}`, 'warn');
@@ -324,6 +393,7 @@ export default async function scanner(root, { params }) {
           running = true;
           placeholder.classList.add('hidden');
           applyMirror();
+          await afterStart();
           requestWakeLock();
           if (!cameras.length) { await listCameras(true); }
           renderCamBtns();
@@ -351,6 +421,11 @@ export default async function scanner(root, { params }) {
   async function stopCamera(silent = false) {
     await resetScanner();
     running = false;
+    caps.zoom = null; caps.torch = false;
+    camWrap.style.maxWidth = '';
+    camWrap.classList.remove('fit-asli', 'fit-penuh');
+    resInfo.textContent = '';
+    renderCamOpts();
     if (!silent) {
       placeholder.classList.remove('hidden');
       placeholder.replaceChildren(h('div', { style: { fontSize: '3rem' } }, '📷'), h('button', { class: 'btn primary lg', onclick: () => startCamera() }, 'Mulai scan'));
@@ -434,7 +509,7 @@ export default async function scanner(root, { params }) {
   document.addEventListener('visibilitychange', onVis);
   const flushTimer = setInterval(flushQueue, 15000);
 
-  updateCount(); renderRecent(); renderCamBtns(); updatePending();
+  updateCount(); renderRecent(); renderCamBtns(); renderCamOpts(); updatePending();
   if (!navigator.onLine) onOffline();
   if (localStorage.getItem('scan-autostart') === '1') startCamera();
 
