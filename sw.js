@@ -1,5 +1,5 @@
 // Service worker: cache app shell & library CDN agar bisa dibuka saat offline.
-const VERSION = 'absensi-qr-v7';
+const VERSION = 'absensi-qr-v8';
 const SHELL = [
   './', './index.html', './config.js', './css/app.css', './manifest.webmanifest', './assets/icon.svg',
   './js/main.js', './js/lib/api.js', './js/lib/ui.js', './js/lib/vendor.js', './js/lib/theme.js', './js/lib/form.js',
