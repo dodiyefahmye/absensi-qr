@@ -1,412 +1,189 @@
-/* =========================================================
-   Absensi QR — Stylesheet
-   ========================================================= */
-:root {
-  --primary: #1d4ed8;
-  --primary-ink: #ffffff;
-  --secondary: #f59e0b;
-  --bg: #f4f6fb;
-  --surface: #ffffff;
-  --surface-2: #f8fafc;
-  --text: #0f172a;
-  --muted: #64748b;
-  --border: #e2e8f0;
-  --ok: #16a34a;
-  --warn: #d97706;
-  --err: #dc2626;
-  --radius: 14px;
-  --shadow: 0 1px 2px rgba(15, 23, 42, .06), 0 4px 16px rgba(15, 23, 42, .06);
-  --font: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  color-scheme: light;
-}
-[data-theme="dark"] {
-  --bg: #0b1120;
-  --surface: #111827;
-  --surface-2: #1f2937;
-  --text: #e5e7eb;
-  --muted: #94a3b8;
-  --border: #273244;
-  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 4px 16px rgba(0,0,0,.3);
-  color-scheme: dark;
+// Halaman e-ticket publik untuk peserta (link dari WhatsApp/email) + check-in mandiri (mode Campuran).
+import * as api from '../lib/api.js';
+import { h, errMsg, fmtTime, downloadBlob, modal, toast } from '../lib/ui.js';
+import { applyTheme } from '../lib/theme.js';
+import { safeFileName } from '../lib/qr.js';
+import { renderTicket } from '../lib/ticket.js';
+import { loadScanner } from '../lib/vendor.js';
+import { deviceId } from '../lib/offline.js';
+import { verifyPrompt } from '../lib/rules.js';
+
+/** Ambil token acara & kode dari isi QR layar: ...#/f/<token>?c=<kode> */
+export function parseEventQR(text) {
+  const m = String(text || '').match(/#\/f\/([A-Za-z0-9_-]+)(?:\?(?:[^#]*&)?c=([A-Za-z0-9]+))?/);
+  return m ? { eventToken: m[1], code: m[2] || null } : null;
 }
 
-* { box-sizing: border-box; }
-html, body { margin: 0; padding: 0; }
-body {
-  font-family: var(--font);
-  background: var(--bg);
-  color: var(--text);
-  font-size: 15px;
-  line-height: 1.5;
-  -webkit-font-smoothing: antialiased;
+export const SELF_MSG = {
+  duplicate: 'Anda sudah tercatat hadir sebelumnya.',
+  not_allowed: 'Check-in untuk Anda dilakukan oleh panitia. Silakan tunjukkan e-ticket ini di meja registrasi.',
+  closed: 'Absensi belum dibuka atau sudah ditutup.',
+  expired_code: 'QR/kode sudah berganti. Silakan scan ulang QR yang sedang tampil di layar.',
+  wrong_event: 'QR yang dipindai bukan milik acara ini.',
+  invalid: 'E-ticket tidak valid.',
+  no_session: 'Belum ada sesi absensi yang sedang berlangsung. Coba lagi saat sesi dimulai.',
+  verify_required: 'Isi data verifikasi terlebih dahulu.',
+  verify_failed: 'Data verifikasi tidak cocok dengan data pendaftaran.',
+  verify_locked: 'Terlalu banyak percobaan salah. Coba lagi 15 menit lagi, atau check-in melalui panitia.',
+  verify_unavailable: 'Data verifikasi Anda belum tercatat. Silakan check-in melalui panitia di meja registrasi.',
+  not_in_session: 'Anda tidak terdaftar di sesi yang sedang berlangsung.',
+};
+
+export default async function ticket(root, { params }) {
+  const page = h('div', { style: { padding: '1.5rem 1rem' } });
+  root.appendChild(page);
+  let data;
+  try { data = await api.getTicket(params.token); } catch (e) {
+    page.append(h('div', { class: 'card center narrow container' }, h('h2', null, 'Gagal memuat tiket'), h('p', { class: 'muted' }, errMsg(e))));
+    return;
+  }
+  if (!data) {
+    page.append(h('div', { class: 'card center container narrow' }, h('h2', null, 'Tiket tidak ditemukan'), h('p', { class: 'muted' }, 'Link tiket tidak valid atau sudah diganti panitia.')));
+    return;
+  }
+  const ev = data.event;
+  applyTheme(page, ev.theme);
+  document.title = 'E-ticket — ' + ev.name;
+  // ingat tiket di HP ini, agar scan QR layar dengan kamera biasa langsung mengenali peserta
+  try { localStorage.setItem('myticket:' + ev.id, JSON.stringify({ token: params.token, name: data.participant.name })); } catch (e) { /* */ }
+
+  const canvas = h('canvas', { class: 'ticket-canvas' });
+  const p = { ...data.participant };
+  const statusBox = h('div', { class: 'center', style: { marginBottom: '1rem' } });
+  const sessionsBox = h('div', { style: { maxWidth: '380px', margin: '0 auto 1rem' } });
+  const hasSessions = () => (data.sessions || []).length > 0;
+  function renderSessions() {
+    if (!hasSessions()) { sessionsBox.replaceChildren(); return; }
+    const now = Date.now();
+    sessionsBox.replaceChildren(h('div', { class: 'card', style: { background: '#fff', color: '#0f172a', padding: '.9rem 1rem' } },
+      h('b', null, '🗓 Sesi absensi Anda'),
+      h('ul', { style: { listStyle: 'none', padding: 0, margin: '.5rem 0 0' } }, data.sessions.map((x) => {
+        const live = now >= +new Date(x.starts_at) && now <= +new Date(x.ends_at);
+        const past = now > +new Date(x.ends_at);
+        const st = x.checked_in_at ? (x.is_late ? ['⏰', 'Terlambat ' + fmtTime(x.checked_in_at).slice(0, 5), '#d97706'] : ['✓', 'Hadir ' + fmtTime(x.checked_in_at).slice(0, 5), '#16a34a'])
+          : live ? ['●', 'Sedang berlangsung', '#2563eb'] : past ? ['✕', 'Tidak hadir', '#dc2626'] : ['○', 'Akan datang', '#64748b'];
+        const when = new Date(x.starts_at).toLocaleString('id-ID', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+        return h('li', { style: { display: 'flex', gap: '.6rem', alignItems: 'center', padding: '.45rem 0', borderBottom: '1px solid #eef2f7' } },
+          h('span', { style: { color: st[2], fontWeight: 900, width: '1.2rem', textAlign: 'center' } }, st[0]),
+          h('span', { style: { flex: 1, minWidth: 0 } }, h('div', { style: { fontWeight: 700 } }, x.name), h('div', { style: { fontSize: '.78rem', color: '#64748b' } }, when)),
+          h('span', { style: { fontSize: '.8rem', fontWeight: 700, color: st[2], whiteSpace: 'nowrap' } }, st[1]));
+      }))));
+  }
+  async function reloadTicket() {
+    try { const d = await api.getTicket(params.token); if (d) { data = d; checkedAt = d.checked_in_at; renderStatus(); renderSessions(); } } catch (e) { /* */ }
+  }
+  let checkedAt = data.checked_in_at;
+  const hybridSelf = ev.mode === 'hybrid' && ev.settings?.self_checkin;
+
+  const infoCard = (title, text) => h('div', { class: 'card', style: { maxWidth: '380px', margin: '0 auto', background: '#fff', color: '#0f172a' } },
+    h('b', null, title), h('div', { class: 'small', style: { color: '#64748b' } }, text));
+  function renderStatus() {
+    const sesi = data.session ? ` (${data.session.name})` : '';
+    if (checkedAt) {
+      statusBox.replaceChildren(h('span', { class: 'badge ok', style: { fontSize: '1rem', padding: '.5rem 1rem' } }, `✓ Sudah check-in${sesi} pukul ${fmtTime(checkedAt)}`));
+    } else if (hybridSelf && data.self_checkin_allowed && hasSessions() && !data.session) {
+      statusBox.replaceChildren(h('div', { class: 'card', style: { maxWidth: '380px', margin: '0 auto', background: '#fff', color: '#0f172a' } },
+        h('b', null, 'Belum ada sesi yang berlangsung'), h('div', { class: 'small', style: { color: '#64748b' } }, 'Tombol check-in akan muncul saat sesi dimulai. Muat ulang halaman ini nanti.')));
+    } else if (hybridSelf && data.self_checkin_allowed) {
+      statusBox.replaceChildren(
+        h('button', { class: 'btn primary lg wrap checkin-btn', onclick: openSelfCheckin },
+          h('span', { class: 'cb-main' }, '📍 Saya sudah tiba, Check-in'),
+          data.session ? h('span', { class: 'cb-sub' }, '🗓 ' + data.session.name) : null),
+        h('div', { class: 'small', style: { opacity: .75, marginTop: '.5rem' } }, 'Tekan tombol ini saat sudah di lokasi, lalu scan QR yang tampil di layar acara.'));
+    } else if (ev.mode === 'event_qr') {
+      statusBox.replaceChildren(infoCard('Absensi lewat QR di layar acara', 'Saat di lokasi, scan QR yang tampil di layar/proyektor acara dengan kamera HP, lalu isi formulir daftar hadir.'));
+    } else {
+      statusBox.replaceChildren(infoCard('Check-in melalui panitia', 'Tunjukkan QR di bawah ini kepada panitia di meja registrasi.'));
+    }
+  }
+
+  function success(info) {
+    checkedAt = info.checked_in_at || new Date().toISOString();
+    renderStatus(); reloadTicket();
+    if (navigator.vibrate) navigator.vibrate([80, 40, 80]);
+    modal({
+      title: 'Check-in berhasil',
+      body: h('div', { class: 'result-ok' }, h('div', { class: 'icon' }, '✓'),
+        h('h2', null, info.name || p.name),
+        info.session ? h('p', { style: { fontWeight: 700 } }, '🗓 ' + info.session.name) : null,
+        h('p', null, `Tercatat hadir pukul ${fmtTime(checkedAt)}`),
+        info.is_late ? h('p', null, h('span', { class: 'badge warn', style: { fontSize: '.95rem' } }, '⏰ Terlambat')) : null,
+        h('p', { class: 'muted' }, ev.settings?.success_message || 'Selamat datang, terima kasih atas kehadiran Anda.')),
+      actions: [{ label: 'Tutup', class: 'primary' }],
+    });
+  }
+
+  async function submit(eventToken, code, verify) {
+    const r = await api.selfCheckIn(params.token, eventToken, code, deviceId(), verify);
+    if (r.status === 'ok') return { done: true, r };
+    if (r.status === 'duplicate') { checkedAt = r.checked_in_at; renderStatus(); return { done: true, r, msg: SELF_MSG.duplicate }; }
+    let msg = SELF_MSG[r.status] || 'Check-in gagal.';
+    if (r.status === 'verify_failed' && r.attempts_left !== undefined) msg += ` Sisa percobaan: ${r.attempts_left}.`;
+    return { done: false, msg, status: r.status, fatal: ['not_allowed', 'closed', 'invalid', 'verify_locked', 'verify_unavailable'].includes(r.status) };
+  }
+
+  async function openSelfCheckin() {
+    let qr = null, busy = false, lastText = '';
+    const reader = h('div', { id: 'self-reader', style: { width: '100%', minHeight: '220px', background: '#000', borderRadius: '12px', overflow: 'hidden' } });
+    const msg = h('div', { class: 'small', style: { minHeight: '1.4em', marginTop: '.5rem', fontWeight: 600 } }, 'Arahkan kamera ke QR di layar acara…');
+    const codeIn = h('input', { type: 'text', placeholder: 'mis. A1B2C3D4', maxlength: 8, style: { textTransform: 'uppercase', letterSpacing: '.15em', fontFamily: 'ui-monospace, monospace' } });
+    const stop = async () => { try { if (qr) await qr.stop(); } catch (e) { /* */ } try { if (qr) qr.clear(); } catch (e) { /* */ } qr = null; };
+    const vp = verifyPrompt(ev);
+    const verifyIn = vp ? h('input', { type: vp.inputType, placeholder: vp.placeholder, maxlength: vp.maxlength, inputmode: vp.inputmode, autocomplete: 'off',
+      style: { fontSize: '1.2rem', textAlign: 'center', letterSpacing: vp.maxlength === 4 ? '.4em' : 'normal' } }) : null;
+    const verifyBox = vp ? h('div', { class: 'card flat', style: { padding: '.8rem', background: '#f8fafc', borderColor: '#cbd5e1' } },
+      h('label', { class: 'field' }, h('span', { class: 'lbl' }, '🔐 Verifikasi: ' + vp.label), verifyIn),
+      h('div', { class: 'small muted' }, 'Isi dulu, lalu scan QR di layar.')) : null;
+    const verifyVal = () => (verifyIn ? verifyIn.value.trim() : null);
+
+    const handle = async (eventToken, code) => {
+      if (busy) return;
+      if (vp && !verifyVal()) { msg.style.color = 'var(--err)'; msg.textContent = '🔐 Isi ' + vp.label + ' terlebih dahulu.'; verifyIn.focus(); return; }
+      if (vp && vp.maxlength === 4 && verifyVal().length !== 4) { msg.style.color = 'var(--err)'; msg.textContent = 'Isi tepat 4 digit/karakter.'; verifyIn.focus(); return; }
+      busy = true; msg.style.color = ''; msg.textContent = 'Memproses…';
+      try {
+        const res = await submit(eventToken, code, verifyVal());
+        if (res.done) { await stop(); m.close(); if (res.r.status === 'ok') success(res.r); else toast(res.msg, 'warn'); return; }
+        msg.style.color = 'var(--err)'; msg.textContent = res.msg;
+        if (res.status === 'verify_failed' && verifyIn) { verifyIn.value = ''; verifyIn.focus(); }
+        if (res.fatal) { await stop(); }
+      } catch (e) { msg.style.color = 'var(--err)'; msg.textContent = errMsg(e); }
+      setTimeout(() => { busy = false; }, 1500);
+    };
+
+    const m = modal({
+      title: 'Check-in mandiri',
+      body: h('div', { class: 'stack' },
+        h('p', { class: 'small muted', style: { margin: 0 } }, `Check-in sebagai ${p.name}. Scan QR yang sedang tampil di layar/proyektor acara.`),
+        verifyBox, reader, msg,
+        h('div', { class: 'small muted', style: { marginTop: '.5rem' } }, 'Kamera tidak bisa dipakai? Ketik kode yang tertulis di bawah QR layar:'),
+        h('div', { class: 'row' }, codeIn, h('button', { class: 'btn primary', onclick: () => {
+          const c = codeIn.value.trim().toUpperCase();
+          if (c.length < 6) { msg.style.color = 'var(--err)'; msg.textContent = 'Kode terdiri dari 8 huruf/angka.'; return; }
+          handle(null, c);
+        } }, 'Kirim kode'))),
+      onClose: () => { stop(); },
+    });
+
+    try {
+      const Html5Qrcode = await loadScanner();
+      qr = new Html5Qrcode('self-reader', { verbose: false, experimentalFeatures: { useBarCodeDetectorIfSupported: true } });
+      await qr.start({ facingMode: 'environment' }, { fps: 10, disableFlip: false }, (text) => {
+        if (busy || text === lastText) return;
+        lastText = text; setTimeout(() => { if (lastText === text) lastText = ''; }, 2500);
+        const info = parseEventQR(text);
+        if (!info) { msg.style.color = 'var(--err)'; msg.textContent = 'Ini bukan QR check-in acara. Scan QR di layar acara.'; return; }
+        handle(info.eventToken, info.code);
+      }, () => {});
+    } catch (e) {
+      reader.replaceChildren(h('div', { style: { color: '#cbd5e1', padding: '1.2rem', textAlign: 'center' } }, 'Kamera tidak dapat dibuka. Izinkan akses kamera, atau ketik kode di bawah.'));
+    }
+  }
+
+  page.append(sessionsBox, statusBox, canvas,
+    h('div', { class: 'row', style: { justifyContent: 'center', marginTop: '1rem' } },
+      h('button', { class: 'btn', onclick: () => canvas.toBlob((b) => downloadBlob(b, `tiket_${safeFileName(p.name)}.png`)) }, '⬇ Simpan tiket')),
+    h('p', { class: 'center small', style: { opacity: .7, marginTop: '1rem' } }, 'Perbesar kecerahan layar saat menunjukkan QR kepada panitia.'));
+  renderStatus(); renderSessions();
+  await renderTicket(p, ev, canvas);
 }
-a { color: var(--primary); }
-img { max-width: 100%; }
-h1, h2, h3, h4 { margin: 0 0 .5rem; line-height: 1.25; }
-h1 { font-size: 1.6rem; } h2 { font-size: 1.3rem; } h3 { font-size: 1.1rem; }
-p { margin: 0 0 .75rem; }
-.muted { color: var(--muted); }
-.small { font-size: .85rem; }
-.center { text-align: center; }
-.hidden { display: none !important; }
-.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-
-/* Layout */
-.container { max-width: 1120px; margin: 0 auto; padding: 1.25rem; }
-.narrow { max-width: 560px; }
-.row { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; }
-.row.between { justify-content: space-between; }
-.row.end { justify-content: flex-end; }
-.stack > * + * { margin-top: .75rem; }
-.grid { display: grid; gap: 1rem; }
-.grid-2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
-.grid-3 { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
-.grid-4 { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
-.spacer { flex: 1; }
-
-/* Topbar */
-.topbar {
-  position: sticky; top: 0; z-index: 20;
-  background: var(--surface); border-bottom: 1px solid var(--border);
-}
-.topbar .container { display: flex; align-items: center; gap: .75rem; padding-top: .7rem; padding-bottom: .7rem; }
-.brand { display: flex; align-items: center; gap: .5rem; font-weight: 700; color: var(--text); text-decoration: none; }
-.brand img { width: 28px; height: 28px; }
-
-/* Card */
-.card {
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: var(--radius); box-shadow: var(--shadow); padding: 1.25rem;
-}
-.card.flat { box-shadow: none; }
-.card h3 { margin-bottom: .25rem; }
-.event-card { display: flex; flex-direction: column; gap: .6rem; }
-.event-card .thumb {
-  height: 84px; border-radius: 10px; display: flex; align-items: center; gap: .75rem;
-  padding: .75rem; color: #fff; background: var(--primary); overflow: hidden;
-}
-.event-card .thumb img { height: 56px; width: 56px; object-fit: contain; background: rgba(255,255,255,.9); border-radius: 8px; padding: 4px; }
-.event-card .thumb strong { font-size: 1.05rem; line-height: 1.2; }
-
-/* Buttons */
-.btn {
-  display: inline-flex; align-items: center; justify-content: center; gap: .4rem;
-  border: 1px solid var(--border); background: var(--surface); color: var(--text);
-  padding: .55rem .95rem; border-radius: 10px; font: inherit; font-weight: 600;
-  cursor: pointer; text-decoration: none; transition: filter .15s, transform .05s;
-  white-space: nowrap;
-}
-.btn:hover { filter: brightness(.97); }
-.btn:active { transform: translateY(1px); }
-.btn:disabled { opacity: .55; cursor: not-allowed; }
-.btn.primary { background: var(--primary); border-color: var(--primary); color: var(--primary-ink); }
-.btn.danger { background: var(--err); border-color: var(--err); color: #fff; }
-.btn.ghost { background: transparent; border-color: transparent; }
-.btn.sm { padding: .35rem .65rem; font-size: .85rem; border-radius: 8px; }
-.btn.lg { padding: .85rem 1.3rem; font-size: 1.05rem; }
-.btn.block { width: 100%; }
-.btn.icon { padding: .45rem; width: 36px; height: 36px; }
-
-/* Forms */
-label.field, .field { display: block; }
-.field > span.lbl { display: block; font-weight: 600; font-size: .9rem; margin-bottom: .3rem; }
-.field .req { color: var(--err); }
-.field .help { font-size: .8rem; color: var(--muted); margin-top: .25rem; }
-input[type=text], input[type=email], input[type=password], input[type=number], input[type=tel],
-input[type=date], input[type=time], input[type=datetime-local], input[type=search], input[type=url],
-select, textarea {
-  width: 100%; padding: .6rem .75rem; border: 1px solid var(--border); border-radius: 10px;
-  background: var(--surface); color: var(--text); font: inherit;
-}
-textarea { min-height: 84px; resize: vertical; }
-input:focus, select:focus, textarea:focus { outline: 2px solid color-mix(in srgb, var(--primary) 35%, transparent); border-color: var(--primary); }
-input[type=color] { width: 48px; height: 38px; border: 1px solid var(--border); border-radius: 8px; padding: 2px; background: var(--surface); cursor: pointer; }
-.check { display: flex; align-items: flex-start; gap: .5rem; cursor: pointer; }
-.check input { margin-top: .25rem; width: 18px; height: 18px; accent-color: var(--primary); }
-.options-list { display: flex; flex-direction: column; gap: .35rem; }
-.field-error { color: var(--err); font-size: .8rem; margin-top: .25rem; }
-.invalid input, .invalid select, .invalid textarea, .invalid .sigpad { border-color: var(--err) !important; }
-
-/* Switch */
-.switch { display: inline-flex; align-items: center; gap: .6rem; cursor: pointer; user-select: none; }
-.switch input { display: none; }
-.switch .track { width: 42px; height: 24px; border-radius: 999px; background: var(--border); position: relative; transition: background .2s; flex: none; }
-.switch .track::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; transition: transform .2s; box-shadow: 0 1px 2px rgba(0,0,0,.2); }
-.switch input:checked + .track { background: var(--primary); }
-.switch input:checked + .track::after { transform: translateX(18px); }
-
-/* Tabs */
-.tabs { display: flex; gap: .25rem; border-bottom: 1px solid var(--border); overflow-x: auto; margin-bottom: 1.25rem; scrollbar-width: none; }
-.tabs button {
-  border: 0; background: none; padding: .7rem 1rem; font: inherit; font-weight: 600; color: var(--muted);
-  border-bottom: 2px solid transparent; cursor: pointer; white-space: nowrap;
-}
-.tabs button.active { color: var(--primary); border-bottom-color: var(--primary); }
-
-/* Badges */
-.badge {
-  display: inline-flex; align-items: center; gap: .3rem; padding: .15rem .55rem; border-radius: 999px;
-  font-size: .75rem; font-weight: 700; background: var(--surface-2); color: var(--muted); border: 1px solid var(--border);
-}
-.badge.ok { background: #dcfce7; color: #166534; border-color: #bbf7d0; }
-.badge.warn { background: #fef3c7; color: #92400e; border-color: #fde68a; }
-.badge.err { background: #fee2e2; color: #991b1b; border-color: #fecaca; }
-.badge.blue { background: #dbeafe; color: #1e40af; border-color: #bfdbfe; }
-.dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; background: var(--muted); }
-.dot.ok { background: var(--ok); } .dot.err { background: var(--err); } .dot.warn { background: var(--warn); }
-
-/* Table */
-.table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
-table { width: 100%; border-collapse: collapse; font-size: .9rem; }
-th, td { padding: .6rem .75rem; text-align: left; border-bottom: 1px solid var(--border); vertical-align: middle; }
-th { background: var(--surface-2); font-weight: 700; font-size: .8rem; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); position: sticky; top: 0; }
-tr:last-child td { border-bottom: 0; }
-td.actions { white-space: nowrap; text-align: right; }
-
-/* Stats */
-.stat { padding: 1rem 1.1rem; }
-.stat .num { font-size: 2rem; font-weight: 800; line-height: 1.1; }
-.stat .lbl { color: var(--muted); font-size: .85rem; font-weight: 600; }
-
-/* Bars (laporan) */
-.bars { display: flex; flex-direction: column; gap: .45rem; }
-.bar-row { display: grid; grid-template-columns: 110px 1fr 46px; gap: .6rem; align-items: center; font-size: .85rem; }
-.bar-row .track { height: 14px; background: var(--surface-2); border-radius: 999px; overflow: hidden; border: 1px solid var(--border); }
-.bar-row .fill { height: 100%; background: var(--primary); border-radius: 999px; }
-.vbars { display: flex; align-items: flex-end; gap: 4px; height: 170px; padding-top: 1rem; }
-.vbars .vb { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; min-width: 0; }
-.vbars .vb .col { width: 100%; background: var(--primary); border-radius: 6px 6px 0 0; min-height: 2px; }
-.vbars .vb small { font-size: .65rem; color: var(--muted); margin-top: 3px; white-space: nowrap; }
-.vbars .vb b { font-size: .7rem; }
-
-/* Toast */
-#toasts { position: fixed; bottom: 1rem; left: 50%; transform: translateX(-50%); z-index: 1000; display: flex; flex-direction: column; gap: .5rem; align-items: center; pointer-events: none; }
-.toast { background: #0f172a; color: #fff; padding: .7rem 1.1rem; border-radius: 10px; box-shadow: var(--shadow); font-weight: 500; animation: pop .2s ease-out; pointer-events: auto; max-width: 92vw; }
-.toast.ok { background: var(--ok); } .toast.err { background: var(--err); } .toast.warn { background: var(--warn); }
-@keyframes pop { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
-
-/* Modal */
-.modal-backdrop { position: fixed; inset: 0; background: rgba(15,23,42,.55); z-index: 500; display: flex; align-items: flex-start; justify-content: center; padding: 4vh 1rem; overflow-y: auto; animation: fade .15s; }
-.modal { background: var(--surface); color: var(--text); border-radius: 16px; width: 100%; max-width: 520px; box-shadow: 0 20px 50px rgba(0,0,0,.3); }
-.modal.wide { max-width: 860px; }
-.modal-head { padding: 1rem 1.25rem; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
-.modal-head h3 { margin: 0; }
-.modal-body { padding: 1.25rem; }
-.modal-foot { padding: .9rem 1.25rem; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: .5rem; flex-wrap: wrap; }
-@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
-
-/* Boot / spinner */
-.boot { min-height: 70vh; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--muted); }
-.spinner { width: 34px; height: 34px; border: 3px solid var(--border); border-top-color: var(--primary); border-radius: 50%; animation: spin .8s linear infinite; }
-@keyframes spin { to { transform: rotate(360deg); } }
-.empty { text-align: center; padding: 2.5rem 1rem; color: var(--muted); }
-.empty .big { font-size: 2.5rem; }
-
-/* Auth */
-.auth-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 1rem;
-  background: radial-gradient(1200px 500px at 10% -10%, color-mix(in srgb, var(--primary) 22%, transparent), transparent), var(--bg); }
-.auth-card { width: 100%; max-width: 420px; }
-.auth-card .logo { width: 56px; height: 56px; margin: 0 auto .75rem; display: block; }
-
-/* Form builder */
-.fb-list { display: flex; flex-direction: column; gap: .6rem; }
-.fb-item { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
-.fb-item .fb-head { display: flex; align-items: center; gap: .5rem; padding: .6rem .75rem; cursor: pointer; }
-.fb-item .fb-head .handle { cursor: grab; color: var(--muted); font-size: 1.1rem; padding: 0 .25rem; touch-action: none; }
-.fb-item .fb-body { padding: .75rem; border-top: 1px solid var(--border); background: var(--surface-2); border-radius: 0 0 12px 12px; }
-.fb-item.locked .fb-head { background: color-mix(in srgb, var(--primary) 6%, transparent); border-radius: 12px; }
-.fb-types { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: .5rem; }
-.fb-types .btn { justify-content: flex-start; }
-.sortable-ghost { opacity: .4; }
-
-/* Branding preview */
-.preview-frame { border-radius: 16px; overflow: hidden; border: 1px solid var(--border); }
-.color-row { display: flex; align-items: center; gap: .6rem; }
-.color-row input[type=text] { max-width: 120px; font-family: ui-monospace, monospace; }
-.logo-box { width: 96px; height: 96px; border: 2px dashed var(--border); border-radius: 12px; display: flex; align-items: center; justify-content: center; overflow: hidden; background: var(--surface-2); }
-.logo-box img { max-width: 100%; max-height: 100%; object-fit: contain; }
-
-/* ====== Halaman bertema acara (form publik, scanner, display, tiket) ====== */
-.themed {
-  --t-primary: #1d4ed8; --t-secondary: #f59e0b; --t-bg: #eef2ff; --t-text: #0f172a; --t-ink: #fff;
-  font-family: var(--t-font, var(--font));
-  background: var(--t-bg); color: var(--t-text); min-height: 100vh;
-}
-.themed .btn.primary { background: var(--t-primary); border-color: var(--t-primary); color: var(--t-ink); }
-.themed input:focus, .themed select:focus, .themed textarea:focus { border-color: var(--t-primary); outline-color: color-mix(in srgb, var(--t-primary) 35%, transparent); }
-.themed .check input { accent-color: var(--t-primary); }
-.t-hero { background: var(--t-primary); color: var(--t-ink); padding: 1.5rem 1.25rem 3.5rem; text-align: center; background-size: cover; background-position: center; position: relative; }
-.t-hero.has-banner::before { content: ""; position: absolute; inset: 0; background: linear-gradient(180deg, rgba(0,0,0,.25), rgba(0,0,0,.55)); }
-.t-hero > * { position: relative; }
-.t-hero .t-logo { max-height: 72px; max-width: 160px; background: rgba(255,255,255,.95); border-radius: 12px; padding: 6px; margin-bottom: .6rem; }
-.t-hero h1 { font-size: 1.45rem; margin-bottom: .25rem; }
-.t-hero .meta { opacity: .9; font-size: .9rem; }
-.t-accent { height: 4px; background: var(--t-secondary); }
-.t-card { background: #fff; color: #0f172a; border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,.12); padding: 1.25rem; max-width: 560px; margin: -2.5rem auto 1.5rem; position: relative; }
-.t-card input, .t-card select, .t-card textarea { background: #fff; color: #0f172a; border-color: #d6dbe4; }
-.t-footer { text-align: center; font-size: .8rem; opacity: .7; padding: 1rem; }
-.result-ok { text-align: center; padding: 1.5rem .5rem; }
-.result-ok .icon { width: 84px; height: 84px; border-radius: 50%; background: var(--ok); color: #fff; font-size: 3rem; display: flex; align-items: center; justify-content: center; margin: 0 auto 1rem; }
-.result-ok .icon.err { background: var(--err); } .result-ok .icon.warn { background: var(--warn); }
-
-.sigpad { width: 100%; height: 170px; border: 1px solid #d6dbe4; border-radius: 10px; background: #fff; touch-action: none; display: block; }
-.photo-prev { max-height: 160px; border-radius: 10px; margin-top: .5rem; display: block; }
-
-/* Scanner */
-.scanner-page { display: flex; flex-direction: column; min-height: 100vh; }
-.scan-top { background: var(--t-primary); color: var(--t-ink); padding: .6rem .9rem; display: flex; align-items: center; gap: .6rem; }
-.scan-top img { height: 36px; width: 36px; object-fit: contain; background: rgba(255,255,255,.95); border-radius: 8px; padding: 2px; }
-.scan-top .title { font-weight: 700; line-height: 1.15; font-size: .95rem; }
-.scan-top .btn { background: rgba(255,255,255,.15); color: var(--t-ink); border-color: rgba(255,255,255,.25); }
-.scan-counter { display: flex; gap: .5rem; padding: .6rem .9rem; background: var(--t-secondary); color: #111; font-weight: 700; align-items: center; flex-wrap: wrap; }
-.scan-counter .big { font-size: 1.4rem; }
-.scan-body { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 1rem; padding: 1rem; flex: 1; }
-@media (max-width: 900px) { .scan-body { grid-template-columns: 1fr; padding: .6rem; } }
-.cam-wrap { position: relative; background: #000; border-radius: 16px; overflow: hidden; width: 100%; margin: 0 auto; min-height: 260px; }
-/* Tampilan asli: video mengikuti rasio kamera, tidak ditarik / dipotong */
-.cam-wrap.fit-asli { min-height: 0; }
-.cam-wrap.fit-asli #reader { width: 100%; }
-.cam-wrap.fit-asli #reader video { display: block; width: 100% !important; height: auto !important; object-fit: contain; }
-/* Kotak penuh: area persegi, gambar dipotong (mode lama) */
-.cam-wrap.fit-penuh { aspect-ratio: 1 / 1; max-height: 72vh; max-width: 72vh; }
-.cam-wrap.fit-penuh #reader { width: 100%; height: 100%; }
-.cam-wrap.fit-penuh #reader video { object-fit: cover; width: 100% !important; height: 100% !important; }
-/* Sebelum kamera menyala */
-.cam-wrap:not(.fit-asli):not(.fit-penuh) { aspect-ratio: 16 / 9; max-height: 72vh; }
-.cam-placeholder { position: absolute; inset: 0; display: flex; flex-direction: column; gap: .75rem; align-items: center; justify-content: center; color: #cbd5e1; text-align: center; padding: 1rem; }
-.scan-overlay { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: #fff; padding: 1rem; animation: fade .12s; z-index: 5; }
-.scan-overlay.ok { background: rgba(22,163,74,.93); }
-.scan-overlay.dup { background: rgba(217,119,6,.94); }
-.scan-overlay.err { background: rgba(220,38,38,.93); }
-.scan-overlay.off { background: rgba(37,99,235,.93); }
-.scan-overlay .ico { font-size: 4rem; line-height: 1; }
-.scan-overlay .nm { font-size: 1.7rem; font-weight: 800; margin: .4rem 0 .2rem; word-break: break-word; }
-.scan-overlay .cat { display: inline-block; padding: .2rem .8rem; border-radius: 999px; background: rgba(255,255,255,.95); color: #111; font-weight: 800; margin-top: .3rem; }
-.scan-side { display: flex; flex-direction: column; gap: .75rem; min-width: 0; }
-.scan-side .card { background: #fff; color: #0f172a; border-color: #e2e8f0; }
-.recent { list-style: none; margin: 0; padding: 0; max-height: 40vh; overflow-y: auto; }
-.recent li { display: flex; align-items: center; gap: .5rem; padding: .45rem 0; border-bottom: 1px solid #eef2f7; font-size: .9rem; }
-.recent li:last-child { border-bottom: 0; }
-.recent .t { color: #64748b; font-size: .8rem; margin-left: auto; white-space: nowrap; }
-.search-results { max-height: 260px; overflow-y: auto; margin-top: .5rem; }
-.search-results button { display: flex; width: 100%; text-align: left; gap: .5rem; align-items: center; border: 0; border-bottom: 1px solid #eef2f7; background: none; padding: .55rem .25rem; cursor: pointer; font: inherit; color: inherit; }
-.search-results button:hover { background: #f1f5f9; }
-
-/* Display / kiosk */
-.display-page { min-height: 100vh; display: flex; flex-direction: column; }
-.display-head { padding: 1.5rem 2rem; display: flex; align-items: center; gap: 1.25rem; background: var(--t-primary); color: var(--t-ink); }
-.display-head img { height: 80px; max-width: 160px; object-fit: contain; background: rgba(255,255,255,.95); border-radius: 14px; padding: 6px; }
-.display-head h1 { font-size: clamp(1.4rem, 3vw, 2.6rem); margin: 0; }
-.display-main { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; padding: 2rem; align-items: center; }
-@media (max-width: 860px) { .display-main { grid-template-columns: 1fr; } }
-.display-qr { background: #fff; border-radius: 24px; padding: 1.5rem; text-align: center; color: #0f172a; box-shadow: 0 20px 50px rgba(0,0,0,.15); }
-.display-qr canvas { width: min(100%, 52vh); height: auto; aspect-ratio: 1; }
-.display-count { font-size: clamp(3rem, 10vw, 8rem); font-weight: 900; line-height: 1; color: var(--t-primary); }
-.welcome { font-size: clamp(1.6rem, 4vw, 3.4rem); font-weight: 800; animation: pop .4s ease-out; }
-.display-list { list-style: none; padding: 0; margin: 1rem 0 0; font-size: clamp(1rem, 1.6vw, 1.4rem); }
-.display-list li { padding: .4rem 0; border-bottom: 1px solid color-mix(in srgb, var(--t-text) 12%, transparent); animation: pop .3s; }
-.display-foot { padding: .75rem 2rem; display: flex; justify-content: space-between; opacity: .75; font-size: .9rem; background: var(--t-secondary); color: #111; }
-
-/* Ticket */
-.ticket-canvas { width: 100%; max-width: 380px; border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,.15); display: block; margin: 0 auto; }
-
-/* Print */
-@media print {
-  .topbar, .tabs, .no-print, #toasts { display: none !important; }
-  body { background: #fff; }
-  .card { box-shadow: none; }
-}
-
-@media (max-width: 640px) {
-  .container { padding: .9rem; }
-  .hide-sm { display: none !important; }
-  .modal-backdrop { padding: 0; align-items: flex-end; }
-  .modal { border-radius: 16px 16px 0 0; max-height: 94vh; overflow-y: auto; }
-}
-
-/* Input di dalam baris flex tidak memaksa lebar penuh */
-.row > input:not([type=checkbox]):not([type=radio]):not([type=color]),
-.row > select { width: auto; flex: 1 1 170px; min-width: 0; }
-
-/* Mirror tampilan kamera (hanya visual, pembacaan QR tidak terpengaruh) */
-#reader.mirror video { transform: scaleX(-1); }
-
-/* Penanda area scan (persegi) */
-#reader #qr-shaded-region { display: none !important; }
-.scan-guide { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 2; pointer-events: none;
-  border-radius: 14px; box-shadow: 0 0 0 9999px rgba(0, 0, 0, .28); }
-.scan-guide .c { position: absolute; width: 18%; height: 18%; border: 5px solid #fff; filter: drop-shadow(0 0 2px rgba(0,0,0,.5)); }
-.scan-guide .tl { top: 0; left: 0; border-right: 0; border-bottom: 0; border-top-left-radius: 14px; }
-.scan-guide .tr { top: 0; right: 0; border-left: 0; border-bottom: 0; border-top-right-radius: 14px; }
-.scan-guide .bl { bottom: 0; left: 0; border-right: 0; border-top: 0; border-bottom-left-radius: 14px; }
-.scan-guide .br { bottom: 0; right: 0; border-left: 0; border-top: 0; border-bottom-right-radius: 14px; }
-.scan-guide .line { position: absolute; left: 8%; right: 8%; height: 2px; top: 10%; background: var(--t-secondary, #f59e0b);
-  box-shadow: 0 0 8px var(--t-secondary, #f59e0b); animation: scanline 2.2s ease-in-out infinite; opacity: .9; }
-@keyframes scanline { 0%, 100% { top: 10%; } 50% { top: 88%; } }
-@media (prefers-reduced-motion: reduce) { .scan-guide .line { animation: none; top: 50%; } }
-
-/* ====== Monitor kehadiran ====== */
-.monitor-page { min-height: 100vh; }
-.monitor-head { background: var(--t-primary); color: var(--t-ink); padding: .75rem 1.25rem; display: flex; align-items: center; gap: .9rem; flex-wrap: wrap; position: sticky; top: 0; z-index: 10; }
-.monitor-head img { height: 44px; width: 44px; object-fit: contain; background: rgba(255,255,255,.95); border-radius: 10px; padding: 3px; }
-.monitor-head .btn { background: rgba(255,255,255,.15); color: var(--t-ink); border-color: rgba(255,255,255,.25); }
-.monitor-title { font-weight: 800; font-size: 1.2rem; line-height: 1.2; }
-.monitor-head .mono { font-size: 1.3rem; font-weight: 700; }
-.monitor-body { max-width: 1500px; margin: 0 auto; padding: 1.25rem; display: flex; flex-direction: column; gap: 1.1rem; }
-.monitor-controls { background: #fff; color: #0f172a; border-radius: 14px; padding: .75rem 1rem; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
-.monitor-controls select { background: #fff; color: #0f172a; }
-.monitor-summary { display: grid; grid-template-columns: repeat(3, minmax(120px, 1fr)) minmax(240px, 2fr); gap: 1rem; }
-@media (max-width: 760px) { .monitor-summary { grid-template-columns: repeat(3, 1fr); } .monitor-summary .ms-wide { grid-column: 1 / -1; } }
-.ms-item { background: #fff; color: #0f172a; border-radius: 14px; padding: 1rem 1.2rem; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
-.ms-num { font-size: 2.4rem; font-weight: 900; line-height: 1.05; }
-.ms-lbl { font-size: .85rem; font-weight: 600; color: #64748b; }
-.ms-pct { font-size: 1.6rem; }
-.ms-bar { height: 12px; background: #eef2f7; border-radius: 999px; overflow: hidden; margin-top: .55rem; }
-.ms-bar > div { height: 100%; border-radius: 999px; transition: width .6s ease; }
-.monitor-groups { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: .8rem; }
-.mg-card { --mg: var(--t-primary); text-align: left; font: inherit; color: #0f172a; background: #fff; border: 2px solid transparent; border-left: 6px solid var(--mg);
-  border-radius: 14px; padding: .85rem 1rem; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,.06); display: flex; flex-direction: column; gap: .25rem; transition: transform .1s, border-color .15s; }
-.mg-card:hover { transform: translateY(-1px); }
-.mg-card.active { border-color: var(--mg); box-shadow: 0 0 0 3px color-mix(in srgb, var(--mg) 20%, transparent); }
-.mg-card.flash { animation: mgflash 2.4s ease-out; }
-@keyframes mgflash { 0% { background: #dcfce7; } 100% { background: #fff; } }
-.mg-all { border-left-color: #94a3b8; justify-content: center; }
-.mg-name { font-weight: 800; font-size: 1.05rem; line-height: 1.25; word-break: break-word; }
-.mg-pct { font-weight: 900; font-size: 1.25rem; }
-.mg-count { font-size: .95rem; color: #334155; }
-.mg-missing { font-size: .85rem; font-weight: 700; color: var(--err); margin-top: .2rem; }
-.mg-missing.done { color: var(--ok); }
-.monitor-detail { background: #fff; color: #0f172a; border-radius: 14px; padding: 1rem 1.2rem; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
-.monitor-detail input[type=search] { background: #fff; color: #0f172a; max-width: 260px; }
-.monitor-list { max-height: 60vh; overflow-y: auto; }
-.ml-items { list-style: none; margin: 0; padding: 0; columns: 3 280px; column-gap: 1.5rem; }
-.ml-items li { display: flex; align-items: center; gap: .5rem; padding: .4rem 0; border-bottom: 1px solid #eef2f7; break-inside: avoid; }
-.ml-name { font-weight: 600; }
-.ml-sub { font-size: .78rem; color: #64748b; }
-.ml-time { margin-left: auto; font-size: .8rem; color: #64748b; white-space: nowrap; text-decoration: none; }
-/* Mode huruf besar untuk TV */
-.monitor-big .monitor-title { font-size: 1.8rem; }
-.monitor-big .ms-num { font-size: 3.6rem; }
-.monitor-big .ms-lbl, .monitor-big .mg-count { font-size: 1.15rem; }
-.monitor-big .mg-name { font-size: 1.45rem; }
-.monitor-big .mg-pct { font-size: 1.7rem; }
-.monitor-big .mg-missing { font-size: 1.1rem; }
-.monitor-big .monitor-groups { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
-.monitor-big .ml-items { font-size: 1.2rem; columns: 3 340px; }
-.mh-title { flex: 1 1 220px; min-width: 0; }
-.mh-tools { display: flex; align-items: center; gap: .9rem; flex-wrap: wrap; }
-@media (max-width: 640px) {
-  .monitor-head { padding: .7rem .9rem; gap: .6rem; }
-  .monitor-title { font-size: 1.05rem; }
-  .mh-tools { width: 100%; justify-content: space-between; gap: .5rem; }
-  .monitor-head .mono { font-size: 1.05rem; }
-  .monitor-body { padding: .8rem; }
-  .ms-num { font-size: 1.9rem; }
-}
-
-/* Bar sesi di scanner */
-.scan-session { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; padding: .5rem .9rem; background: #fff; color: #0f172a; border-bottom: 1px solid #e2e8f0; }
-.scan-session select { background: #fff; color: #0f172a; padding: .4rem .6rem; }
-.scan-session.warn { background: #fef3c7; }
-/* Sembunyikan penanda scan saat hasil scan tampil */
-.cam-wrap:has(.scan-overlay:not(.hidden)) .scan-guide { visibility: hidden; }
