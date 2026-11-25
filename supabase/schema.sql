@@ -95,6 +95,13 @@ create table if not exists public.event_sessions (
   constraint event_sessions_time_check check (ends_at > starts_at)
 );
 
+-- Catatan percobaan verifikasi gagal (untuk membatasi tebak-tebakan)
+create table if not exists public.self_checkin_attempts (
+  id             bigint generated always as identity primary key,
+  participant_id uuid not null references public.participants(id) on delete cascade,
+  created_at     timestamptz not null default now()
+);
+
 create table if not exists public.event_templates (
   id           uuid primary key default gen_random_uuid(),
   owner_id     uuid not null default auth.uid() references public.profiles(id) on delete cascade,
@@ -135,6 +142,7 @@ alter table public.attendances drop constraint if exists attendances_event_parti
 create unique index if not exists attendances_once_per_session
   on public.attendances (event_id, participant_id, (coalesce(session_id, '00000000-0000-0000-0000-000000000000'::uuid)));
 create index if not exists event_sessions_event_idx on public.event_sessions(event_id, starts_at);
+create index if not exists self_checkin_attempts_idx on public.self_checkin_attempts(participant_id, created_at desc);
 
 create index if not exists participants_event_idx on public.participants(event_id);
 create index if not exists participants_name_idx  on public.participants(event_id, lower(name));
@@ -215,6 +223,22 @@ returns jsonb language sql stable as $$
     jsonb_build_object('id', s.id, 'name', s.name, 'starts_at', s.starts_at, 'ends_at', s.ends_at, 'late_after', s.late_after) end;
 $$;
 
+-- Verifikasi data pribadi saat check-in mandiri
+--   settings.self_checkin.verify = { enabled, field: <key> | _phone | _email | _nim..., mode: last4 | full }
+create or replace function public.verify_norm(v text, digits_only boolean default false)
+returns text language sql immutable as $$
+  select case when digits_only then regexp_replace(coalesce(v, ''), '\D', '', 'g')
+              else lower(regexp_replace(coalesce(v, ''), '[\s\.\-/_,]', '', 'g')) end;
+$$;
+
+create or replace function public.verify_source(p public.participants, e public.events)
+returns text language sql stable as $$
+  select case e.settings->'self_checkin'->'verify'->>'field'
+           when '_phone' then p.phone
+           when '_email' then p.email
+           else p.data->>(e.settings->'self_checkin'->'verify'->>'field') end;
+$$;
+
 create or replace function public.event_is_open(e public.events, p_at timestamptz default now())
 returns boolean language sql stable as $$
   select e.is_active and e.is_open
@@ -240,7 +264,11 @@ returns jsonb language sql stable as $$
       'success_message', e.settings->>'success_message',
       'self_checkin', e.mode = 'hybrid' and coalesce((e.settings->'self_checkin'->>'enabled')::boolean, false),
       'walkin', e.mode = 'hybrid' and coalesce((e.settings->'walkin'->>'enabled')::boolean, false),
-      'walkin_category', coalesce(nullif(e.settings->'walkin'->>'category', ''), 'Tamu tambahan')
+      'walkin_category', coalesce(nullif(e.settings->'walkin'->>'category', ''), 'Tamu tambahan'),
+      'verify', case when coalesce((e.settings->'self_checkin'->'verify'->>'enabled')::boolean, false)
+                     then jsonb_build_object('field', e.settings->'self_checkin'->'verify'->>'field',
+                                             'mode', coalesce(e.settings->'self_checkin'->'verify'->>'mode', 'last4'))
+                     else null end
     ),
     'is_open', public.event_is_open(e)
   );
@@ -300,7 +328,8 @@ alter table public.participants    enable row level security;
 alter table public.attendances     enable row level security;
 alter table public.event_templates enable row level security;
 alter table public.pembuat_acara   enable row level security;
-alter table public.event_sessions  enable row level security;  -- hanya bisa dikelola dari dashboard Supabase
+alter table public.event_sessions  enable row level security;
+alter table public.self_checkin_attempts enable row level security;  -- hanya diakses fungsi database  -- hanya bisa dikelola dari dashboard Supabase
 
 -- profiles
 drop policy if exists profiles_select on public.profiles;
@@ -616,8 +645,10 @@ $$;
 
 -- 5e2. Check-in mandiri oleh tamu (mode Campuran)
 --      Identitas: token e-ticket pribadi. Kehadiran di lokasi: QR/kode berputar dari layar acara.
+drop function if exists public.self_check_in(text, text, text, text);
 create or replace function public.self_check_in(
-  p_ticket text, p_event_token text default null, p_code text default null, p_device_id text default null
+  p_ticket text, p_event_token text default null, p_code text default null, p_device_id text default null,
+  p_verify text default null
 ) returns jsonb language plpgsql security definer set search_path = public, extensions as $$
 declare
   v_p   public.participants;
@@ -627,6 +658,10 @@ declare
   v_win bigint;
   v_s   public.event_sessions;
   v_late boolean := false;
+  v_src  text;
+  v_digits boolean;
+  v_fails int;
+  v_ok   boolean;
 begin
   select * into v_p from public.participants where qr_token = p_ticket;
   if not found then return jsonb_build_object('status', 'invalid'); end if;
@@ -662,6 +697,37 @@ begin
       return jsonb_build_object('status', 'not_in_session', 'name', v_p.name, 'session', public.session_json(v_s));
     end if;
     v_late := v_s.late_after is not null and now() > v_s.late_after;
+  end if;
+
+  -- Verifikasi data pribadi (maks. 5 kali gagal per 15 menit)
+  if coalesce((v_e.settings->'self_checkin'->'verify'->>'enabled')::boolean, false)
+     and not exists (select 1 from public.attendances a where a.event_id = v_e.id and a.participant_id = v_p.id
+                     and a.session_id is not distinct from v_s.id) then
+    select count(*) into v_fails from public.self_checkin_attempts
+    where participant_id = v_p.id and created_at > now() - interval '15 minutes';
+    if v_fails >= 5 then
+      return jsonb_build_object('status', 'verify_locked', 'name', v_p.name);
+    end if;
+    v_src := public.verify_source(v_p, v_e);
+    if coalesce(trim(v_src), '') = '' then
+      return jsonb_build_object('status', 'verify_unavailable', 'name', v_p.name);
+    end if;
+    if coalesce(trim(p_verify), '') = '' then
+      return jsonb_build_object('status', 'verify_required', 'name', v_p.name);
+    end if;
+    v_digits := (v_e.settings->'self_checkin'->'verify'->>'field') = '_phone'
+                or public.verify_norm(v_src, true) = regexp_replace(coalesce(v_src, ''), '\s', '', 'g');
+    if coalesce(v_e.settings->'self_checkin'->'verify'->>'mode', 'last4') = 'last4' then
+      v_ok := length(public.verify_norm(p_verify, v_digits)) = 4
+              and right(public.verify_norm(v_src, v_digits), 4) = public.verify_norm(p_verify, v_digits);
+    else
+      v_ok := public.verify_norm(v_src, v_digits) = public.verify_norm(p_verify, v_digits);
+    end if;
+    if not v_ok then
+      insert into public.self_checkin_attempts (participant_id) values (v_p.id);
+      return jsonb_build_object('status', 'verify_failed', 'name', v_p.name, 'attempts_left', greatest(0, 4 - v_fails));
+    end if;
+    delete from public.self_checkin_attempts where participant_id = v_p.id;
   end if;
 
   insert into public.attendances (event_id, participant_id, name, category, data, source, device_id, device_label, session_id, is_late)
@@ -720,7 +786,7 @@ grant execute on function public.check_in(uuid, text, uuid, text, text, timestam
 grant execute on function public.get_public_event(text) to anon, authenticated;
 grant execute on function public.submit_public_attendance(text, text, jsonb, text) to anon, authenticated;
 grant execute on function public.get_ticket(text) to anon, authenticated;
-grant execute on function public.self_check_in(text, text, text, text) to anon, authenticated;
+grant execute on function public.self_check_in(text, text, text, text, text) to anon, authenticated;
 
 -- ---------------------------------------------------------------------
 -- 6. REALTIME

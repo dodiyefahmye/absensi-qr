@@ -6,6 +6,7 @@ import { safeFileName } from '../lib/qr.js';
 import { renderTicket } from '../lib/ticket.js';
 import { loadScanner } from '../lib/vendor.js';
 import { deviceId } from '../lib/offline.js';
+import { verifyPrompt } from '../lib/rules.js';
 
 /** Ambil token acara & kode dari isi QR layar: ...#/f/<token>?c=<kode> */
 export function parseEventQR(text) {
@@ -21,6 +22,10 @@ export const SELF_MSG = {
   wrong_event: 'QR yang dipindai bukan milik acara ini.',
   invalid: 'E-ticket tidak valid.',
   no_session: 'Belum ada sesi absensi yang sedang berlangsung. Coba lagi saat sesi dimulai.',
+  verify_required: 'Isi data verifikasi terlebih dahulu.',
+  verify_failed: 'Data verifikasi tidak cocok dengan data pendaftaran.',
+  verify_locked: 'Terlalu banyak percobaan salah. Coba lagi 15 menit lagi, atau check-in melalui panitia.',
+  verify_unavailable: 'Data verifikasi Anda belum tercatat. Silakan check-in melalui panitia di meja registrasi.',
   not_in_session: 'Anda tidak terdaftar di sesi yang sedang berlangsung.',
 };
 
@@ -70,6 +75,8 @@ export default async function ticket(root, { params }) {
   let checkedAt = data.checked_in_at;
   const hybridSelf = ev.mode === 'hybrid' && ev.settings?.self_checkin;
 
+  const infoCard = (title, text) => h('div', { class: 'card', style: { maxWidth: '380px', margin: '0 auto', background: '#fff', color: '#0f172a' } },
+    h('b', null, title), h('div', { class: 'small', style: { color: '#64748b' } }, text));
   function renderStatus() {
     const sesi = data.session ? ` (${data.session.name})` : '';
     if (checkedAt) {
@@ -81,10 +88,11 @@ export default async function ticket(root, { params }) {
       statusBox.replaceChildren(
         h('button', { class: 'btn primary lg', style: { width: '100%', maxWidth: '380px', fontSize: '1.15rem', padding: '1rem' }, onclick: openSelfCheckin }, '📍 Saya sudah tiba, Check-in' + (data.session ? ` — ${data.session.name}` : '')),
         h('div', { class: 'small', style: { opacity: .75, marginTop: '.5rem' } }, 'Tekan tombol di atas saat sudah di lokasi, lalu scan QR yang tampil di layar acara.'));
-    } else if (hybridSelf) {
-      statusBox.replaceChildren(h('div', { class: 'card', style: { maxWidth: '380px', margin: '0 auto', background: '#fff', color: '#0f172a' } },
-        h('b', null, 'Check-in melalui panitia'), h('div', { class: 'small', style: { color: '#64748b' } }, 'Tunjukkan QR di bawah ini kepada panitia di meja registrasi.')));
-    } else statusBox.replaceChildren();
+    } else if (ev.mode === 'event_qr') {
+      statusBox.replaceChildren(infoCard('Absensi lewat QR di layar acara', 'Saat di lokasi, scan QR yang tampil di layar/proyektor acara dengan kamera HP, lalu isi formulir daftar hadir.'));
+    } else {
+      statusBox.replaceChildren(infoCard('Check-in melalui panitia', 'Tunjukkan QR di bawah ini kepada panitia di meja registrasi.'));
+    }
   }
 
   function success(info) {
@@ -103,11 +111,13 @@ export default async function ticket(root, { params }) {
     });
   }
 
-  async function submit(eventToken, code) {
-    const r = await api.selfCheckIn(params.token, eventToken, code, deviceId());
+  async function submit(eventToken, code, verify) {
+    const r = await api.selfCheckIn(params.token, eventToken, code, deviceId(), verify);
     if (r.status === 'ok') return { done: true, r };
     if (r.status === 'duplicate') { checkedAt = r.checked_in_at; renderStatus(); return { done: true, r, msg: SELF_MSG.duplicate }; }
-    return { done: false, msg: SELF_MSG[r.status] || 'Check-in gagal.', fatal: ['not_allowed', 'closed', 'invalid'].includes(r.status) };
+    let msg = SELF_MSG[r.status] || 'Check-in gagal.';
+    if (r.status === 'verify_failed' && r.attempts_left !== undefined) msg += ` Sisa percobaan: ${r.attempts_left}.`;
+    return { done: false, msg, status: r.status, fatal: ['not_allowed', 'closed', 'invalid', 'verify_locked', 'verify_unavailable'].includes(r.status) };
   }
 
   async function openSelfCheckin() {
@@ -116,14 +126,24 @@ export default async function ticket(root, { params }) {
     const msg = h('div', { class: 'small', style: { minHeight: '1.4em', marginTop: '.5rem', fontWeight: 600 } }, 'Arahkan kamera ke QR di layar acara…');
     const codeIn = h('input', { type: 'text', placeholder: 'mis. A1B2C3D4', maxlength: 8, style: { textTransform: 'uppercase', letterSpacing: '.15em', fontFamily: 'ui-monospace, monospace' } });
     const stop = async () => { try { if (qr) await qr.stop(); } catch (e) { /* */ } try { if (qr) qr.clear(); } catch (e) { /* */ } qr = null; };
+    const vp = verifyPrompt(ev);
+    const verifyIn = vp ? h('input', { type: vp.inputType, placeholder: vp.placeholder, maxlength: vp.maxlength, inputmode: vp.inputmode, autocomplete: 'off',
+      style: { fontSize: '1.2rem', textAlign: 'center', letterSpacing: vp.maxlength === 4 ? '.4em' : 'normal' } }) : null;
+    const verifyBox = vp ? h('div', { class: 'card flat', style: { padding: '.8rem', background: '#f8fafc', borderColor: '#cbd5e1' } },
+      h('label', { class: 'field' }, h('span', { class: 'lbl' }, '🔐 Verifikasi: ' + vp.label), verifyIn),
+      h('div', { class: 'small muted' }, 'Isi dulu, lalu scan QR di layar.')) : null;
+    const verifyVal = () => (verifyIn ? verifyIn.value.trim() : null);
 
     const handle = async (eventToken, code) => {
       if (busy) return;
+      if (vp && !verifyVal()) { msg.style.color = 'var(--err)'; msg.textContent = '🔐 Isi ' + vp.label + ' terlebih dahulu.'; verifyIn.focus(); return; }
+      if (vp && vp.maxlength === 4 && verifyVal().length !== 4) { msg.style.color = 'var(--err)'; msg.textContent = 'Isi tepat 4 digit/karakter.'; verifyIn.focus(); return; }
       busy = true; msg.style.color = ''; msg.textContent = 'Memproses…';
       try {
-        const res = await submit(eventToken, code);
+        const res = await submit(eventToken, code, verifyVal());
         if (res.done) { await stop(); m.close(); if (res.r.status === 'ok') success(res.r); else toast(res.msg, 'warn'); return; }
         msg.style.color = 'var(--err)'; msg.textContent = res.msg;
+        if (res.status === 'verify_failed' && verifyIn) { verifyIn.value = ''; verifyIn.focus(); }
         if (res.fatal) { await stop(); }
       } catch (e) { msg.style.color = 'var(--err)'; msg.textContent = errMsg(e); }
       setTimeout(() => { busy = false; }, 1500);
@@ -133,7 +153,7 @@ export default async function ticket(root, { params }) {
       title: 'Check-in mandiri',
       body: h('div', { class: 'stack' },
         h('p', { class: 'small muted', style: { margin: 0 } }, `Check-in sebagai ${p.name}. Scan QR yang sedang tampil di layar/proyektor acara.`),
-        reader, msg,
+        verifyBox, reader, msg,
         h('div', { class: 'small muted', style: { marginTop: '.5rem' } }, 'Kamera tidak bisa dipakai? Ketik kode yang tertulis di bawah QR layar:'),
         h('div', { class: 'row' }, codeIn, h('button', { class: 'btn primary', onclick: () => {
           const c = codeIn.value.trim().toUpperCase();

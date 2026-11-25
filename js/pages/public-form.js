@@ -5,6 +5,7 @@ import { applyTheme } from '../lib/theme.js';
 import { renderForm } from '../lib/form.js';
 import { deviceId } from '../lib/offline.js';
 import { SELF_MSG } from './ticket.js';
+import { verifyPrompt } from '../lib/rules.js';
 
 export default async function publicForm(root, { params, query }) {
   const page = h('div');
@@ -59,22 +60,29 @@ export default async function publicForm(root, { params, query }) {
     const parts = [h('h2', { style: { marginBottom: '.5rem' } }, 'Check-in')];
 
     if (selfOn && mine?.token) {
+      const vp = verifyPrompt(ev);
+      const verifyIn = vp ? h('input', { type: vp.inputType, placeholder: vp.placeholder, maxlength: vp.maxlength, inputmode: vp.inputmode, autocomplete: 'off',
+        style: { fontSize: '1.2rem', textAlign: 'center', letterSpacing: vp.maxlength === 4 ? '.4em' : 'normal', background: '#fff', color: '#0f172a' } }) : null;
       const btn = h('button', { class: 'btn primary block lg', style: { marginTop: '.5rem' }, onclick: async () => {
+        if (vp && !verifyIn.value.trim()) { errBox.textContent = '🔐 Isi ' + vp.label + ' terlebih dahulu.'; verifyIn.focus(); return; }
+        if (vp && vp.maxlength === 4 && verifyIn.value.trim().length !== 4) { errBox.textContent = 'Isi tepat 4 digit/karakter.'; verifyIn.focus(); return; }
         btn.disabled = true; btn.textContent = 'Memproses…'; errBox.textContent = '';
         try {
-          const r = await api.selfCheckIn(mine.token, params.token, query.c || null, deviceId());
+          const r = await api.selfCheckIn(mine.token, params.token, query.c || null, deviceId(), verifyIn ? verifyIn.value.trim() : null);
           if (r.status === 'ok' || r.status === 'duplicate') {
             const info = { name: r.name || mine.name, at: r.checked_in_at, dup: r.status === 'duplicate', late: r.is_late, session: r.session?.name, session_id: ev.session?.id || null };
             localStorage.setItem(storeKey, JSON.stringify(info));
             return success(info);
           }
-          errBox.textContent = SELF_MSG[r.status] || 'Check-in gagal.';
+          errBox.textContent = (SELF_MSG[r.status] || 'Check-in gagal.') + (r.status === 'verify_failed' && r.attempts_left !== undefined ? ` Sisa percobaan: ${r.attempts_left}.` : '');
+          if (r.status === 'verify_failed' && verifyIn) verifyIn.value = '';
         } catch (e) { errBox.textContent = errMsg(e); }
         btn.disabled = false; btn.textContent = 'Check-in sekarang';
       } }, 'Check-in sekarang');
       parts.push(h('div', { class: 'card flat', style: { background: '#f8fafc', borderColor: '#e2e8f0', padding: '1rem' } },
         h('div', { style: { color: '#64748b', fontSize: '.85rem' } }, 'E-ticket di HP ini atas nama:'),
         h('div', { style: { fontSize: '1.3rem', fontWeight: 800 } }, mine.name),
+        vp ? h('label', { class: 'field', style: { marginTop: '.75rem' } }, h('span', { class: 'lbl' }, '🔐 Verifikasi: ' + vp.label), verifyIn) : null,
         btn, errBox,
         h('a', { href: 'javascript:void 0', class: 'small', style: { color: '#64748b', display: 'block', textAlign: 'center', marginTop: '.6rem' },
           onclick: () => { localStorage.removeItem('myticket:' + ev.id); card.replaceChildren(); hybridChooser(); } }, 'Bukan saya')));

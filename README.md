@@ -24,6 +24,7 @@ dengan **GitHub Pages** + **Supabase**.
 | **Peserta** | Input manual, import Excel/CSV, e-ticket PNG, unduh semua e-ticket (ZIP), kirim via WhatsApp/email |
 | **Desain kartu** | Kartu potret/lanskap, pilih data peserta yang dicetak (NIM, fakultas, dll.), foto peserta, teks tambahan, cetak semua kartu ke PDF A4 |
 | **Layar tampilan** | Mode kiosk/proyektor: QR besar, jumlah hadir raksasa, "Selamat datang, [nama]!" |
+| **Verifikasi peserta** | Check-in mandiri bisa diwajibkan mengisi data pribadi dari data pendaftaran (mis. 4 digit terakhir NIM/No. HP, atau tanggal lahir lengkap). Salah 5 kali → dikunci 15 menit. Data tidak pernah ditampilkan ke publik |
 | **Sesi (absen berkali-kali)** | Satu acara bisa punya banyak sesi (mis. OSPEK pagi & sore selama 2 hari, atau Seminar hari 1 + Workshop hari 2). Satu e-ticket untuk semua sesi, scanner otomatis memakai sesi yang berlangsung, status terlambat, sesi khusus kategori tertentu, rekap matriks peserta × sesi (Excel/PDF) |
 | **Monitor kehadiran** | Layar realtime per kategori atau kolom data (fakultas, prodi, dll.), urutkan berdasarkan persentase/belum hadir, daftar siapa yang belum datang, mode huruf besar untuk TV |
 | **Laporan** | Statistik, grafik kedatangan per jam, per kategori, per meja dan per operator. Ekspor **Excel**, **CSV**, **PDF** (dengan kop logo & tanda tangan) |
@@ -113,7 +114,8 @@ Setiap kali Anda push ke `main`, aplikasi otomatis ter-update.
 1. **Buat acara** → template *Wisuda / Campuran*, atau ubah mode di **Pengaturan → Campuran**.
 2. **Pengaturan → 🔀 Check-in mandiri**: pilih siapa yang boleh check-in sendiri (semua / kategori tertentu / yang ditandai). Bisa juga mengizinkan tamu tidak terdaftar.
 3. Pengecualian per orang ada di tab **Peserta** (✏️ Ubah → *Check-in mandiri*), atau secara massal lewat menu **⋯**. Bisa juga lewat kolom Excel `Check-in mandiri` (Ya/Tidak).
-4. Hari-H: tampilkan **🖥️ Layar tampilan** (QR + kode berganti otomatis). Tamu membuka e-ticket → **"Saya sudah tiba, Check-in"** → scan QR layar, atau ketik kodenya. Yang tidak boleh mandiri tetap dipindai panitia seperti biasa.
+4. (Disarankan) Nyalakan **🔐 Wajib verifikasi data pribadi** di kartu yang sama, lalu pilih datanya (mis. 4 digit terakhir NIM) agar e-ticket tidak bisa dititipkan.
+5. Hari-H: tampilkan **🖥️ Layar tampilan** (QR + kode berganti otomatis). Tamu membuka e-ticket → **"Saya sudah tiba, Check-in"** → scan QR layar, atau ketik kodenya. Yang tidak boleh mandiri tetap dipindai panitia seperti biasa.
 
 ### D. Acara beberapa sesi (OSPEK pagi & sore, kegiatan 2 hari)
 1. Buka acara → tab **🗓 Sesi** → **⚡ Buat sesi cepat** (mis. 2 hari × Pagi & Sore), atau **＋ Tambah sesi** satu per satu.

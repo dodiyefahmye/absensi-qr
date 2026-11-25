@@ -7,7 +7,7 @@ import { ticketDesignerTab } from '../components/ticket-designer.js';
 import { sessionsTab } from '../components/sessions-tab.js';
 import { renderForm } from '../lib/form.js';
 import { drawQR, joinUrl, publicFormUrl } from '../lib/qr.js';
-import { usesParticipantScan, usesEventQR, selfCheckinConfig, walkinConfig } from '../lib/rules.js';
+import { usesParticipantScan, usesEventQR, selfCheckinConfig, walkinConfig, verifyFieldOptions, verifyConfig, verifyPrompt } from '../lib/rules.js';
 
 const TABS = [
   ['info', '📄 Info'], ['branding', '🎨 Tampilan'], ['form', '🧾 Formulir'],
@@ -271,6 +271,24 @@ function settingsTab(body, { ev, save }) {
   let categories = JSON.parse(JSON.stringify(ev.categories || []));
 
   const modeBox = h('div', { class: 'grid', style: { gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))' } });
+  const modeHint = h('div');
+  let participantCount = 0;
+  api.eventCounts(ev.id).then((c) => { participantCount = c.participants; renderModeHint(); }).catch(() => {});
+  function renderModeHint() {
+    if (mode === 'event_qr' && participantCount > 0) {
+      modeHint.replaceChildren(h('div', { class: 'card flat stack', style: { borderColor: 'var(--warn)', background: 'color-mix(in srgb, var(--warn) 10%, transparent)', padding: '.9rem 1rem', marginTop: '.75rem' } },
+        h('b', null, `💡 Acara ini punya ${participantCount} peserta terdaftar`),
+        h('div', { class: 'small' }, 'Di mode QR Acara, isian formulir TIDAK terhubung ke daftar peserta (peserta tetap terhitung "belum hadir" di Monitor & rekap), dan e-ticket tidak punya tombol check-in mandiri.'),
+        h('div', { class: 'small' }, 'Gunakan mode 🔀 Campuran: peserta check-in sendiri dari e-ticket (scan QR layar) dan tetap bisa dipindai panitia.'),
+        h('div', null, h('button', { class: 'btn sm primary', onclick: () => {
+          mode = 'hybrid'; renderMode(); syncVis();
+          scOn.input.checked = true; sc.who = 'all'; wkOn.input.checked = false; rot.input.checked = true;
+          whoBox.querySelector('input[value="all"]').checked = true; syncSc();
+          toast('Mode Campuran dipilih — periksa pengaturan di bawah lalu klik Simpan pengaturan', 'warn');
+          hyBox.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        } }, 'Gunakan mode Campuran'))));
+    } else modeHint.replaceChildren();
+  }
   const renderMode = () => modeBox.replaceChildren(...[
     ['participant_qr', '🎫 QR Peserta', 'Setiap peserta punya QR/e-ticket unik. Panitia memindai di meja registrasi. Cocok untuk acara formal & undangan.'],
     ['event_qr', '🖥️ QR Acara', 'Satu QR ditampilkan di layar. Peserta memindai dengan HP lalu mengisi formulir. Cocok untuk rapat & acara terbuka.'],
@@ -334,6 +352,38 @@ function settingsTab(body, { ev, save }) {
     catChecks.classList.toggle('hidden', sc.who !== 'categories');
     renderCatChecks();
   };
+  // verifikasi data pribadi
+  const vc = { enabled: false, field: '', mode: 'last4', ...(sc.verify || {}) };
+  const vOpts = verifyFieldOptions(ev);
+  if (!vc.field && vOpts.length) vc.field = (vOpts.find((o) => /nim|nip|npm|nik|nis/i.test(o.key + o.label)) || vOpts.find((o) => o.key === '_phone') || vOpts[0]).key;
+  const vOn = switchEl(vc.enabled, '🔐 Wajib verifikasi data pribadi saat check-in mandiri', () => syncV());
+  const vField = h('select', { onchange: () => { vc.field = vField.value; syncV(); } }, vOpts.map((o) => h('option', { value: o.key }, o.label)));
+  vField.value = vc.field;
+  const vMode = h('select', { onchange: () => { vc.mode = vMode.value; syncV(); } },
+    h('option', { value: 'last4' }, '4 digit/karakter terakhir'), h('option', { value: 'full' }, 'Isian lengkap (mis. tanggal lahir)'));
+  vMode.value = vc.mode;
+  const vPreview = h('div', { class: 'small', style: { fontWeight: 600 } });
+  const vMissing = h('div', { class: 'small', style: { color: 'var(--warn)' } });
+  const vBody = h('div', { class: 'stack', style: { paddingLeft: '.4rem' } },
+    h('div', { class: 'grid grid-2' },
+      h('label', { class: 'field' }, h('span', { class: 'lbl' }, 'Data yang dicocokkan'), vField),
+      h('label', { class: 'field' }, h('span', { class: 'lbl' }, 'Cara mencocokkan'), vMode)),
+    vPreview, vMissing,
+    h('div', { class: 'help' }, 'Data diambil dari data pendaftaran peserta (tab Peserta / Import Excel) dan tidak pernah ditampilkan ke publik. Salah 5 kali → check-in mandiri peserta itu dikunci 15 menit.'));
+  let vPeople = null;
+  api.listParticipants(ev.id).then((list) => { vPeople = list; syncV(); }).catch(() => {});
+  const syncV = () => {
+    vBody.classList.toggle('hidden', !vOn.input.checked);
+    const pr = verifyPrompt({ ...ev, settings: { self_checkin: { verify: { enabled: true, field: vc.field, mode: vc.mode } } } });
+    vPreview.textContent = pr ? `Peserta akan diminta mengisi: "${pr.label}"` : '';
+    if (vPeople) {
+      const val = (p) => (vc.field === '_phone' ? p.phone : vc.field === '_email' ? p.email : p.data?.[vc.field]);
+      const miss = vPeople.filter((p) => !String(val(p) ?? '').trim()).length;
+      vMissing.textContent = miss ? `⚠️ ${miss} dari ${vPeople.length} peserta belum punya data ini, jadi mereka harus check-in lewat panitia. Lengkapi lewat tab Peserta atau Import Excel.` : (vPeople.length ? `✓ Semua ${vPeople.length} peserta punya data ini.` : '');
+    }
+  };
+  if (!vOpts.length) { vOn.input.disabled = true; vPreview.textContent = 'Tambahkan dulu field data peserta (mis. NIM) di tab Formulir.'; }
+
   const wkOn = switchEl(wk.enabled, 'Izinkan tamu tidak terdaftar check-in dengan mengisi formulir');
   const wkCat = h('input', { type: 'text', value: wk.category || 'Tamu tambahan', style: { maxWidth: '260px' } });
   const hyBox = h('div', { class: 'card stack' },
@@ -343,15 +393,18 @@ function settingsTab(body, { ev, save }) {
     h('div', null, h('div', { style: { fontWeight: 600, fontSize: '.9rem', marginBottom: '.35rem' } }, 'Siapa yang boleh check-in mandiri?'), whoBox),
     h('div', { class: 'help' }, '💡 Pengecualian per orang (selalu boleh / tidak boleh) bisa diatur di tab Peserta, dan berlaku di atas aturan ini. Peserta yang tidak boleh mandiri tetap bisa dipindai panitia.'),
     h('hr', { style: { border: 0, borderTop: '1px solid var(--border)', width: '100%' } }),
+    vOn.el, vBody,
+    h('hr', { style: { border: 0, borderTop: '1px solid var(--border)', width: '100%' } }),
     wkOn.el,
     h('label', { class: 'field' }, h('span', { class: 'lbl' }, 'Kategori untuk tamu tidak terdaftar'), wkCat,
       h('div', { class: 'help' }, 'Tamu ini mengisi formulir dari tab Formulir dan dicatat terpisah dari daftar undangan.')));
-  syncSc();
+  syncSc(); syncV();
   // perbarui daftar kategori di aturan mandiri saat kategori diubah
   catList.addEventListener('input', () => renderCatChecks());
   catList.addEventListener('click', () => setTimeout(renderCatChecks, 0));
 
   const syncVis = () => {
+    renderModeHint();
     eqBox.classList.toggle('hidden', mode === 'participant_qr');
     pqBox.classList.toggle('hidden', mode === 'event_qr');
     hyBox.classList.toggle('hidden', mode !== 'hybrid');
@@ -360,7 +413,7 @@ function settingsTab(body, { ev, save }) {
   syncVis();
 
   body.appendChild(h('div', { class: 'stack', style: { maxWidth: '860px' } },
-    h('div', { class: 'card stack' }, h('h3', null, 'Mode absensi'), modeBox),
+    h('div', { class: 'card stack' }, h('h3', null, 'Mode absensi'), modeBox, modeHint),
     h('div', { class: 'card stack' },
       h('h3', null, 'Waktu & status'),
       isActive.el, isOpen.el,
@@ -382,7 +435,8 @@ function settingsTab(body, { ev, save }) {
         settings: { ...s, rotating_qr: rot.input.checked, rotate_seconds: Math.max(10, Number(rotSec.value) || 30),
           one_submit_per_device: perDevice.input.checked, unique_field: uniq.value, success_message: success.value.trim(),
           scan_reset_ms: Math.min(5000, Math.max(600, Number(resetMs.value) || 1600)),
-          self_checkin: { enabled: scOn.input.checked, who: sc.who, categories: sc.categories },
+          self_checkin: { enabled: scOn.input.checked, who: sc.who, categories: sc.categories,
+            verify: { enabled: vOn.input.checked && !!vc.field, field: vc.field, mode: vc.mode } },
           walkin: { enabled: wkOn.input.checked, category: wkCat.value.trim() || 'Tamu tambahan' } },
       }, 'Pengaturan tersimpan');
     } }, 'Simpan pengaturan')),

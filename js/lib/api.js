@@ -159,8 +159,8 @@ export const getPublicEvent = async (token) => check(await sb.rpc('get_public_ev
 export const submitPublic = async (token, code, data, deviceId) =>
   check(await sb.rpc('submit_public_attendance', { p_token: token, p_code: code || null, p_data: data, p_device_id: deviceId }));
 export const getTicket = async (token) => check(await sb.rpc('get_ticket', { p_qr_token: token }));
-export const selfCheckIn = async (ticket, eventToken, code, deviceId) =>
-  check(await sb.rpc('self_check_in', { p_ticket: ticket, p_event_token: eventToken || null, p_code: code || null, p_device_id: deviceId || null }));
+export const selfCheckIn = async (ticket, eventToken, code, deviceId, verify) =>
+  check(await sb.rpc('self_check_in', { p_ticket: ticket, p_event_token: eventToken || null, p_code: code || null, p_device_id: deviceId || null, p_verify: verify || null }));
 
 /* ---------------- Templates ---------------- */
 export const listTemplates = async () => check(await sb.from('event_templates').select('*').order('created_at', { ascending: false }));
