@@ -86,8 +86,10 @@ export default async function ticket(root, { params }) {
         h('b', null, 'Belum ada sesi yang berlangsung'), h('div', { class: 'small', style: { color: '#64748b' } }, 'Tombol check-in akan muncul saat sesi dimulai. Muat ulang halaman ini nanti.')));
     } else if (hybridSelf && data.self_checkin_allowed) {
       statusBox.replaceChildren(
-        h('button', { class: 'btn primary lg', style: { width: '100%', maxWidth: '380px', fontSize: '1.15rem', padding: '1rem' }, onclick: openSelfCheckin }, '📍 Saya sudah tiba, Check-in' + (data.session ? ` — ${data.session.name}` : '')),
-        h('div', { class: 'small', style: { opacity: .75, marginTop: '.5rem' } }, 'Tekan tombol di atas saat sudah di lokasi, lalu scan QR yang tampil di layar acara.'));
+        h('button', { class: 'btn primary lg wrap checkin-btn', onclick: openSelfCheckin },
+          h('span', { class: 'cb-main' }, '📍 Saya sudah tiba, Check-in'),
+          data.session ? h('span', { class: 'cb-sub' }, '🗓 ' + data.session.name) : null),
+        h('div', { class: 'small', style: { opacity: .75, marginTop: '.5rem' } }, 'Tekan tombol ini saat sudah di lokasi, lalu scan QR yang tampil di layar acara.'));
     } else if (ev.mode === 'event_qr') {
       statusBox.replaceChildren(infoCard('Absensi lewat QR di layar acara', 'Saat di lokasi, scan QR yang tampil di layar/proyektor acara dengan kamera HP, lalu isi formulir daftar hadir.'));
     } else {
@@ -178,7 +180,7 @@ export default async function ticket(root, { params }) {
     }
   }
 
-  page.append(statusBox, sessionsBox, canvas,
+  page.append(sessionsBox, statusBox, canvas,
     h('div', { class: 'row', style: { justifyContent: 'center', marginTop: '1rem' } },
       h('button', { class: 'btn', onclick: () => canvas.toBlob((b) => downloadBlob(b, `tiket_${safeFileName(p.name)}.png`)) }, '⬇ Simpan tiket')),
     h('p', { class: 'center small', style: { opacity: .7, marginTop: '1rem' } }, 'Perbesar kecerahan layar saat menunjukkan QR kepada panitia.'));
