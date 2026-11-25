@@ -5,6 +5,7 @@ import { normalizeTheme, categoryColor, contrastInk } from '../lib/theme.js';
 import { displayValue } from '../lib/form.js';
 import { toExcel, toCSV, toPDF } from '../lib/exporter.js';
 import { safeFileName } from '../lib/qr.js';
+import { activeSession, sortSessions, inSession, fmtSessionRange, sessionStatus } from '../lib/sessions.js';
 
 const SOURCE = { scan: 'Scan panitia', form: 'Formulir', manual: 'Manual', self: 'Mandiri' };
 
@@ -13,10 +14,12 @@ export default async function report(root, { params }) {
   root.appendChild(wrap);
   wrap.appendChild(spinner());
 
-  let ev, role, people = [], atts = [];
+  let ev, role, people = [], atts = [], allPeople = [], allAtts = [], sessions = [];
   try {
     [ev, role] = await Promise.all([api.getEvent(params.id), api.myRole(params.id)]);
-    [people, atts] = await Promise.all([api.listParticipants(ev.id), api.listAttendances(ev.id)]);
+    let ss;
+    [allPeople, allAtts, ss] = await Promise.all([api.listParticipants(ev.id), api.listAttendances(ev.id), api.listSessions(ev.id).catch(() => [])]);
+    sessions = sortSessions(ss);
   } catch (e) {
     wrap.replaceChildren(h('div', { class: 'card empty' }, h('p', null, errMsg(e)), h('a', { class: 'btn', href: '#/' }, 'Kembali')));
     return;
@@ -28,7 +31,23 @@ export default async function report(root, { params }) {
   const fields = (ev.form_schema || []).filter((f) => f.key !== 'nama');
   const textFields = fields.filter((f) => !['signature', 'photo'].includes(f.type));
   const sigField = fields.find((f) => f.type === 'signature');
-  const pmode = ev.mode === 'participant_qr' || people.length > 0;
+  const pmode = ev.mode === 'participant_qr' || allPeople.length > 0;
+
+  // ---------- sesi: 'rekap' (semua sesi) atau id sesi ----------
+  let sessionView = sessions.length ? (activeSession(sessions)?.id || 'rekap') : null;
+  const curSession = () => sessions.find((x) => x.id === sessionView) || null;
+  const isRekap = () => sessions.length > 0 && sessionView === 'rekap';
+  function applySession() {
+    const cur = curSession();
+    if (!sessions.length) { people = allPeople; atts = allAtts; return; }
+    if (isRekap()) { people = allPeople; atts = allAtts; return; }
+    people = allPeople.filter((p) => inSession(p, cur));
+    atts = allAtts.filter((a) => a.session_id === cur?.id);
+  }
+  const sessionSel = h('select', { 'aria-label': 'Pilih sesi', style: { maxWidth: '420px' }, onchange: () => { sessionView = sessionSel.value; view = 'hadir'; refreshNow(); } },
+    h('option', { value: 'rekap' }, '📋 Rekap semua sesi'),
+    ...sessions.map((x) => h('option', { value: x.id }, `${x.name} · ${fmtSessionRange(x)}`)));
+  if (sessionView) sessionSel.value = sessionView;
 
   let view = 'hadir';
   const statsBox = h('div', { class: 'grid grid-4' });
@@ -48,6 +67,8 @@ export default async function report(root, { params }) {
         h('button', { class: 'btn', onclick: exportCSV }, '⬇ CSV'),
         h('button', { class: 'btn', onclick: exportPDF }, '⬇ PDF'),
         h('button', { class: 'btn', onclick: () => window.print() }, '🖨 Cetak'))),
+    sessions.length ? h('div', { class: 'card no-print', style: { marginBottom: '1rem', padding: '.8rem 1rem' } },
+      h('label', { class: 'row', style: { gap: '.6rem' } }, h('b', null, '🗓 Sesi:'), sessionSel)) : null,
     statsBox, chartsBox,
     h('div', { class: 'card', style: { marginTop: '1rem' } },
       h('div', { class: 'row between no-print', style: { marginBottom: '.75rem' } }, viewSel, q),
@@ -96,7 +117,30 @@ export default async function report(root, { params }) {
     return Array.from(m.entries()).sort((a, b) => b[1] - a[1]);
   }
 
+  function renderRekapStats() {
+    const started = sessions.filter((x) => sessionStatus(x) !== 'upcoming');
+    const slots = allPeople.reduce((n, p) => n + started.filter((x) => inSession(p, x)).length, 0);
+    const filled = allAtts.filter((a) => a.participant_id && started.some((x) => x.id === a.session_id)).length;
+    const late = allAtts.filter((a) => a.is_late).length;
+    statsBox.replaceChildren(
+      stat(allPeople.length, 'Peserta'),
+      stat(sessions.length, 'Jumlah sesi'),
+      stat(slots ? Math.round((filled / slots) * 100) + '%' : '—', `Rata-rata kehadiran (${started.length} sesi berjalan)`, theme.primary),
+      stat(late, 'Total terlambat', late ? 'var(--warn)' : null));
+    const per = sessions.map((x) => {
+      const tot = allPeople.filter((p) => inSession(p, x)).length;
+      const n = allAtts.filter((a) => a.session_id === x.id && a.participant_id).length;
+      return [x.name, n, tot];
+    });
+    chartsBox.replaceChildren(h('div', { class: 'card', style: { gridColumn: '1 / -1' } }, h('h3', null, 'Kehadiran per sesi'),
+      h('div', { class: 'bars', style: { marginTop: '.75rem' } }, per.map(([k, v, tot]) =>
+        h('div', { class: 'bar-row', style: { gridTemplateColumns: 'minmax(120px, 220px) 1fr 80px' } }, h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: k }, k),
+          h('div', { class: 'track' }, h('div', { class: 'fill', style: { width: `${tot ? (v / tot) * 100 : 0}%`, background: theme.primary } })),
+          h('b', null, `${v}/${tot}`))))));
+  }
+
   function renderStats() {
+    if (isRekap()) return renderRekapStats();
     const hadir = atts.length;
     if (pmode && people.length) {
       const inv = people.length;
@@ -148,13 +192,51 @@ export default async function report(root, { params }) {
     return people.filter((p) => !ap.has(p.id) && (!s || (p.name + ' ' + (p.category || '')).toLowerCase().includes(s)));
   }
 
+  function rekapMatrix() {
+    const s = q.value.trim().toLowerCase();
+    const byKey = new Map(allAtts.filter((a) => a.participant_id && a.session_id).map((a) => [a.participant_id + '|' + a.session_id, a]));
+    return allPeople.filter((p) => !s || (p.name + ' ' + (p.category || '')).toLowerCase().includes(s))
+      .sort((a, b) => a.name.localeCompare(b.name, 'id'))
+      .map((p) => {
+        const cells = sessions.map((x) => {
+          if (!inSession(p, x)) return { k: 'na' };
+          const a = byKey.get(p.id + '|' + x.id);
+          if (a) return { k: a.is_late ? 'late' : 'ok', a };
+          const st = sessionStatus(x);
+          return { k: st === 'done' ? 'no' : st === 'live' ? 'live' : 'soon' };
+        });
+        // persentase dihitung dari sesi yang sudah dimulai (atau sudah dihadiri)
+        const need = cells.filter((c) => c.k === 'ok' || c.k === 'late' || c.k === 'no' || c.k === 'live').length;
+        const got = cells.filter((c) => c.k === 'ok' || c.k === 'late').length;
+        return { p, cells, need, got, late: cells.filter((c) => c.k === 'late').length };
+      });
+  }
+  const CELL = { ok: ['✓', 'var(--ok)'], late: ['⏰', 'var(--warn)'], no: ['✕', 'var(--err)'], live: ['●', '#2563eb'], soon: ['○', 'var(--muted)'], na: ['—', 'var(--muted)'] };
+  function renderRekapTable() {
+    const rows = rekapMatrix();
+    if (!rows.length) { tableBox.replaceChildren(h('div', { class: 'empty' }, 'Belum ada peserta')); return; }
+    tableBox.replaceChildren(
+      h('div', { class: 'small muted', style: { marginBottom: '.5rem' } }, '✓ hadir · ⏰ terlambat · ✕ tidak hadir · ● sedang berlangsung (belum absen) · ○ belum dimulai · — bukan peserta sesi itu. Persentase dihitung dari sesi yang sudah dimulai.'),
+      h('div', { class: 'table-wrap' }, h('table', null,
+        h('thead', null, h('tr', null, h('th', null, 'No'), h('th', null, 'Nama'), h('th', null, 'Kategori'),
+          ...sessions.map((x) => h('th', { style: { textAlign: 'center' }, title: fmtSessionRange(x) }, x.name)),
+          h('th', null, 'Hadir'), h('th', null, '%'))),
+        h('tbody', null, rows.map((r, i) => h('tr', null,
+          h('td', null, i + 1), h('td', null, h('strong', null, r.p.name)), h('td', null, catBadge(r.p.category)),
+          ...r.cells.map((c) => h('td', { style: { textAlign: 'center', color: CELL[c.k][1], fontWeight: 800 }, title: c.a ? fmtTime(c.a.checked_in_at) : '' }, CELL[c.k][0])),
+          h('td', null, `${r.got}/${r.need}`),
+          h('td', { style: { fontWeight: 700, color: r.need && r.got === r.need ? 'var(--ok)' : r.got ? 'inherit' : 'var(--err)' } }, r.need ? Math.round((r.got / r.need) * 100) + '%' : '—')))))));
+  }
+
   function renderViewSel() {
+    if (isRekap()) { viewSel.replaceChildren(h('b', null, 'Rekap kehadiran per peserta')); return; }
     viewSel.replaceChildren(
       h('button', { class: 'btn sm ' + (view === 'hadir' ? 'primary' : ''), onclick: () => { view = 'hadir'; renderViewSel(); renderTable(); } }, `Hadir (${atts.length})`),
       pmode && people.length ? h('button', { class: 'btn sm ' + (view === 'belum' ? 'primary' : ''), onclick: () => { view = 'belum'; renderViewSel(); renderTable(); } }, `Belum hadir (${rowsBelum().length})`) : null);
   }
 
   function renderTable() {
+    if (isRekap()) return renderRekapTable();
     if (view === 'belum') {
       const list = rowsBelum();
       tableBox.replaceChildren(list.length ? h('div', { class: 'table-wrap' }, h('table', null,
@@ -182,7 +264,7 @@ export default async function report(root, { params }) {
         h('td', null, i + 1),
         h('td', null, h('strong', null, a.name || '—')),
         h('td', null, catBadge(a.category)),
-        h('td', { class: 'small' }, fmtTime(a.checked_in_at)),
+        h('td', { class: 'small' }, fmtTime(a.checked_in_at), a.is_late ? h('span', { class: 'badge warn', style: { marginLeft: '.3rem' } }, '⏰ Terlambat') : null),
         ...shownFields.map((f) => h('td', { class: 'small hide-sm' }, displayValue(f, a.data?.[f.key]))),
         sigField ? h('td', null, a.data?.[sigField.key] ? h('img', { src: a.data[sigField.key], alt: 'TTD', style: { height: '36px', background: '#fff', borderRadius: '4px' } }) : '') : null,
         h('td', { class: 'small muted hide-sm' }, [a.device_label, opName(a), SOURCE[a.source]].filter(Boolean).join(' · ')),
@@ -190,7 +272,7 @@ export default async function report(root, { params }) {
           h('button', { class: 'btn sm ghost', title: 'Detail', onclick: () => detail(a) }, '👁'),
           isAdmin ? h('button', { class: 'btn sm ghost', title: 'Batalkan kehadiran', onclick: async () => {
             if (!(await confirmDialog(`Batalkan kehadiran ${a.name}?`, { danger: true, okLabel: 'Batalkan' }))) return;
-            try { await api.deleteAttendance(a.id); atts = atts.filter((x) => x.id !== a.id); refresh(); } catch (e) { toast(errMsg(e), 'err'); }
+            try { await api.deleteAttendance(a.id); allAtts = allAtts.filter((x) => x.id !== a.id); refresh(); } catch (e) { toast(errMsg(e), 'err'); }
           } }, '✕') : null)))))));
   }
 
@@ -222,6 +304,7 @@ export default async function report(root, { params }) {
   function hadirRows() {
     return rowsHadir().map((a, i) => ({
       No: i + 1, Nama: a.name || '', Kategori: a.category || '',
+      ...(sessions.length ? { Sesi: sessions.find((x) => x.id === a.session_id)?.name || '', Terlambat: a.is_late ? 'Ya' : '' } : {}),
       Tanggal: new Date(a.checked_in_at).toLocaleDateString('id-ID'), Jam: fmtTime(a.checked_in_at),
       ...Object.fromEntries(textFields.map((f) => [f.label, displayValue(f, a.data?.[f.key])])),
       Perangkat: a.device_label || '', Operator: opName(a) || '', Sumber: SOURCE[a.source] || a.source,
@@ -231,7 +314,22 @@ export default async function report(root, { params }) {
     return rowsBelum().map((p, i) => ({ No: i + 1, Nama: p.name, Kategori: p.category || '', Email: p.email || '', 'No HP': p.phone || '',
       ...Object.fromEntries(textFields.map((f) => [f.label, displayValue(f, p.data?.[f.key])])) }));
   }
+  function rekapRows() {
+    return rekapMatrix().map((r, i) => ({
+      No: i + 1, Nama: r.p.name, Kategori: r.p.category || '',
+      ...Object.fromEntries(textFields.map((f) => [f.label, displayValue(f, r.p.data?.[f.key])])),
+      ...Object.fromEntries(sessions.map((x, j) => [x.name, { ok: 'Hadir', late: 'Terlambat', no: 'Tidak hadir', live: 'Belum absen (berlangsung)', soon: 'Belum dimulai', na: '-' }[r.cells[j].k]])),
+      'Jumlah hadir': r.got, 'Wajib hadir': r.need, Terlambat: r.late, 'Persentase': r.need ? Math.round((r.got / r.need) * 100) + '%' : '-',
+    }));
+  }
+
   async function exportExcel() {
+    if (isRekap()) {
+      try {
+        await toExcel([{ name: 'Rekap', rows: rekapRows() }, { name: 'Detail absensi', rows: hadirRows() }], `rekap_${safeFileName(ev.name)}_${new Date().toISOString().slice(0, 10)}.xlsx`);
+      } catch (e) { toast(errMsg(e), 'err'); }
+      return;
+    }
     const ap = attByP();
     const summary = [
       { Keterangan: 'Nama acara', Nilai: ev.name },
@@ -248,8 +346,19 @@ export default async function report(root, { params }) {
     sheets.push({ name: 'Ringkasan', rows: summary });
     try { await toExcel(sheets, base() + '.xlsx'); } catch (e) { toast(errMsg(e), 'err'); }
   }
-  function exportCSV() { toCSV(view === 'belum' ? belumRows() : hadirRows(), base() + (view === 'belum' ? '_belum' : '') + '.csv'); }
+  function exportCSV() { if (isRekap()) return toCSV(rekapRows(), `rekap_${safeFileName(ev.name)}.csv`); toCSV(view === 'belum' ? belumRows() : hadirRows(), base() + (view === 'belum' ? '_belum' : '') + '.csv'); }
   async function exportPDF() {
+    if (isRekap()) {
+      const rows = rekapMatrix();
+      try {
+        await toPDF({ title: 'Rekap Kehadiran — ' + ev.name, lines: [`${sessions.length} sesi · ${allPeople.length} peserta`, 'V = hadir, T = terlambat, X = tidak hadir, . = belum dimulai/berlangsung, - = bukan peserta sesi'],
+          logoUrl: theme.logo_url, color: theme.primary, landscape: true,
+          head: ['No', 'Nama', 'Kategori', ...sessions.map((x) => x.name), 'Hadir', '%'],
+          body: rows.map((r, i) => [i + 1, r.p.name, r.p.category || '', ...r.cells.map((c) => ({ ok: 'V', late: 'T', no: 'X', live: '.', soon: '.', na: '-' }[c.k])), `${r.got}/${r.need}`, r.need ? Math.round((r.got / r.need) * 100) + '%' : '-']),
+          filename: `rekap_${safeFileName(ev.name)}.pdf` });
+      } catch (e) { toast(errMsg(e), 'err'); }
+      return;
+    }
     const isBelum = view === 'belum';
     const pdfFields = textFields.slice(0, isBelum ? 3 : 3);
     const head = isBelum
@@ -262,7 +371,7 @@ export default async function report(root, { params }) {
     const ap = attByP();
     try {
       await toPDF({
-        title: (isBelum ? 'Daftar Belum Hadir — ' : 'Daftar Hadir — ') + ev.name,
+        title: (isBelum ? 'Daftar Belum Hadir — ' : 'Daftar Hadir — ') + ev.name + (curSession() ? ' — ' + curSession().name : ''),
         lines: [
           [ev.event_date ? fmtDate(ev.event_date) : '', ev.start_time ? hhmm(ev.start_time) + (ev.end_time ? '–' + hhmm(ev.end_time) : '') : ''].filter(Boolean).join(', '),
           [ev.location, ev.organizer].filter(Boolean).join(' · '),
@@ -279,24 +388,25 @@ export default async function report(root, { params }) {
 
   // ---------- realtime ----------
   function upsertAtt(row) {
-    const i = atts.findIndex((x) => x.id === row.id);
-    if (i >= 0) atts[i] = { ...atts[i], ...row }; else atts.unshift(row);
+    const i = allAtts.findIndex((x) => x.id === row.id);
+    if (i >= 0) allAtts[i] = { ...allAtts[i], ...row }; else allAtts.unshift(row);
     refresh();
   }
-  const refresh = debounce(() => { renderStats(); renderViewSel(); renderTable(); }, 200);
+  const refreshNow = () => { applySession(); renderStats(); renderViewSel(); renderTable(); };
+  const refresh = debounce(refreshNow, 200);
   const unsub = api.subscribeEvent(ev.id, {
     attendance: (type, row, old) => {
-      if (type === 'DELETE') { atts = atts.filter((x) => x.id !== old?.id); refresh(); }
+      if (type === 'DELETE') { allAtts = allAtts.filter((x) => x.id !== old?.id); refresh(); }
       else if (row) upsertAtt(row);
     },
     participant: (type, row, old) => {
-      if (type === 'DELETE') people = people.filter((p) => p.id !== old?.id);
-      else if (row) { const i = people.findIndex((p) => p.id === row.id); if (i >= 0) people[i] = row; else people.push(row); }
+      if (type === 'DELETE') allPeople = allPeople.filter((p) => p.id !== old?.id);
+      else if (row) { const i = allPeople.findIndex((p) => p.id === row.id); if (i >= 0) allPeople[i] = row; else allPeople.push(row); }
       refresh();
     },
   });
 
   q.addEventListener('input', debounce(renderTable, 150));
-  renderStats(); renderViewSel(); renderTable();
+  refreshNow();
   return unsub;
 }

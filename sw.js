@@ -1,10 +1,10 @@
 // Service worker: cache app shell & library CDN agar bisa dibuka saat offline.
-const VERSION = 'absensi-qr-v5';
+const VERSION = 'absensi-qr-v6';
 const SHELL = [
   './', './index.html', './config.js', './css/app.css', './manifest.webmanifest', './assets/icon.svg',
   './js/main.js', './js/lib/api.js', './js/lib/ui.js', './js/lib/vendor.js', './js/lib/theme.js', './js/lib/form.js',
-  './js/lib/qr.js', './js/lib/ticket.js', './js/lib/rules.js', './js/lib/offline.js', './js/lib/exporter.js',
-  './js/components/form-builder.js', './js/components/participants.js', './js/components/ticket-designer.js',
+  './js/lib/qr.js', './js/lib/ticket.js', './js/lib/rules.js', './js/lib/sessions.js', './js/lib/offline.js', './js/lib/exporter.js',
+  './js/components/form-builder.js', './js/components/participants.js', './js/components/ticket-designer.js', './js/components/sessions-tab.js',
   './js/pages/login.js', './js/pages/dashboard.js', './js/pages/editor.js', './js/pages/scanner.js',
   './js/pages/display.js', './js/pages/monitor.js', './js/pages/report.js', './js/pages/public-form.js', './js/pages/ticket.js', './js/pages/join.js',
 ];

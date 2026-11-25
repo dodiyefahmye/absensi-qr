@@ -403,3 +403,10 @@ td.actions { white-space: nowrap; text-align: right; }
   .monitor-body { padding: .8rem; }
   .ms-num { font-size: 1.9rem; }
 }
+
+/* Bar sesi di scanner */
+.scan-session { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; padding: .5rem .9rem; background: #fff; color: #0f172a; border-bottom: 1px solid #e2e8f0; }
+.scan-session select { background: #fff; color: #0f172a; padding: .4rem .6rem; }
+.scan-session.warn { background: #fef3c7; }
+/* Sembunyikan penanda scan saat hasil scan tampil */
+.cam-wrap:has(.scan-overlay:not(.hidden)) .scan-guide { visibility: hidden; }

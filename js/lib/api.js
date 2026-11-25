@@ -126,12 +126,22 @@ export const listAttendances = (eventId) =>
 
 export const deleteAttendance = async (id) => check(await sb.from('attendances').delete().eq('id', id));
 
-export async function checkIn({ eventId, token = null, participantId = null, deviceLabel = null, clientId = null, checkedAt = null }) {
+export async function checkIn({ eventId, token = null, participantId = null, deviceLabel = null, clientId = null, checkedAt = null, sessionId = null }) {
   return check(await sb.rpc('check_in', {
     p_event_id: eventId, p_qr_token: token, p_participant_id: participantId,
-    p_device_label: deviceLabel, p_client_id: clientId, p_checked_at: checkedAt,
+    p_device_label: deviceLabel, p_client_id: clientId, p_checked_at: checkedAt, p_session_id: sessionId,
   }));
 }
+
+/* ---------------- Sessions ---------------- */
+export const listSessions = async (eventId) =>
+  check(await sb.from('event_sessions').select('*').eq('event_id', eventId).order('starts_at', { ascending: true }));
+export async function saveSession(row) {
+  if (row.id) { const { id, ...patch } = row; return check(await sb.from('event_sessions').update(patch).eq('id', id).select().single()); }
+  return check(await sb.from('event_sessions').insert(row).select().single());
+}
+export const insertSessions = async (rows) => check(await sb.from('event_sessions').insert(rows).select());
+export const deleteSession = async (id) => check(await sb.from('event_sessions').delete().eq('id', id));
 
 /* ---------------- Members ---------------- */
 export const listMembers = async (eventId) =>
@@ -189,6 +199,9 @@ export function subscribeEvent(eventId, handlers = {}) {
     ch.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'participants', filter }, relay('participant'));
     ch.on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'participants', filter }, relay('participant'));
     ch.on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'participants' }, relay('participant'));
+  }
+  if (handlers.sessions) {
+    ch.on('postgres_changes', { event: '*', schema: 'public', table: 'event_sessions', filter }, () => handlers.sessions());
   }
   if (handlers.event) {
     ch.on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'events', filter: `id=eq.${eventId}` }, (p) => handlers.event(p.new));

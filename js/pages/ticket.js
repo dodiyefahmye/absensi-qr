@@ -20,6 +20,8 @@ export const SELF_MSG = {
   expired_code: 'QR/kode sudah berganti. Silakan scan ulang QR yang sedang tampil di layar.',
   wrong_event: 'QR yang dipindai bukan milik acara ini.',
   invalid: 'E-ticket tidak valid.',
+  no_session: 'Belum ada sesi absensi yang sedang berlangsung. Coba lagi saat sesi dimulai.',
+  not_in_session: 'Anda tidak terdaftar di sesi yang sedang berlangsung.',
 };
 
 export default async function ticket(root, { params }) {
@@ -43,15 +45,41 @@ export default async function ticket(root, { params }) {
   const canvas = h('canvas', { class: 'ticket-canvas' });
   const p = { ...data.participant };
   const statusBox = h('div', { class: 'center', style: { marginBottom: '1rem' } });
+  const sessionsBox = h('div', { style: { maxWidth: '380px', margin: '0 auto 1rem' } });
+  const hasSessions = () => (data.sessions || []).length > 0;
+  function renderSessions() {
+    if (!hasSessions()) { sessionsBox.replaceChildren(); return; }
+    const now = Date.now();
+    sessionsBox.replaceChildren(h('div', { class: 'card', style: { background: '#fff', color: '#0f172a', padding: '.9rem 1rem' } },
+      h('b', null, '🗓 Sesi absensi Anda'),
+      h('ul', { style: { listStyle: 'none', padding: 0, margin: '.5rem 0 0' } }, data.sessions.map((x) => {
+        const live = now >= +new Date(x.starts_at) && now <= +new Date(x.ends_at);
+        const past = now > +new Date(x.ends_at);
+        const st = x.checked_in_at ? (x.is_late ? ['⏰', 'Terlambat ' + fmtTime(x.checked_in_at).slice(0, 5), '#d97706'] : ['✓', 'Hadir ' + fmtTime(x.checked_in_at).slice(0, 5), '#16a34a'])
+          : live ? ['●', 'Sedang berlangsung', '#2563eb'] : past ? ['✕', 'Tidak hadir', '#dc2626'] : ['○', 'Akan datang', '#64748b'];
+        const when = new Date(x.starts_at).toLocaleString('id-ID', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+        return h('li', { style: { display: 'flex', gap: '.6rem', alignItems: 'center', padding: '.45rem 0', borderBottom: '1px solid #eef2f7' } },
+          h('span', { style: { color: st[2], fontWeight: 900, width: '1.2rem', textAlign: 'center' } }, st[0]),
+          h('span', { style: { flex: 1, minWidth: 0 } }, h('div', { style: { fontWeight: 700 } }, x.name), h('div', { style: { fontSize: '.78rem', color: '#64748b' } }, when)),
+          h('span', { style: { fontSize: '.8rem', fontWeight: 700, color: st[2], whiteSpace: 'nowrap' } }, st[1]));
+      }))));
+  }
+  async function reloadTicket() {
+    try { const d = await api.getTicket(params.token); if (d) { data = d; checkedAt = d.checked_in_at; renderStatus(); renderSessions(); } } catch (e) { /* */ }
+  }
   let checkedAt = data.checked_in_at;
   const hybridSelf = ev.mode === 'hybrid' && ev.settings?.self_checkin;
 
   function renderStatus() {
+    const sesi = data.session ? ` (${data.session.name})` : '';
     if (checkedAt) {
-      statusBox.replaceChildren(h('span', { class: 'badge ok', style: { fontSize: '1rem', padding: '.5rem 1rem' } }, `✓ Sudah check-in pukul ${fmtTime(checkedAt)}`));
+      statusBox.replaceChildren(h('span', { class: 'badge ok', style: { fontSize: '1rem', padding: '.5rem 1rem' } }, `✓ Sudah check-in${sesi} pukul ${fmtTime(checkedAt)}`));
+    } else if (hybridSelf && data.self_checkin_allowed && hasSessions() && !data.session) {
+      statusBox.replaceChildren(h('div', { class: 'card', style: { maxWidth: '380px', margin: '0 auto', background: '#fff', color: '#0f172a' } },
+        h('b', null, 'Belum ada sesi yang berlangsung'), h('div', { class: 'small', style: { color: '#64748b' } }, 'Tombol check-in akan muncul saat sesi dimulai. Muat ulang halaman ini nanti.')));
     } else if (hybridSelf && data.self_checkin_allowed) {
       statusBox.replaceChildren(
-        h('button', { class: 'btn primary lg', style: { width: '100%', maxWidth: '380px', fontSize: '1.15rem', padding: '1rem' }, onclick: openSelfCheckin }, '📍 Saya sudah tiba, Check-in'),
+        h('button', { class: 'btn primary lg', style: { width: '100%', maxWidth: '380px', fontSize: '1.15rem', padding: '1rem' }, onclick: openSelfCheckin }, '📍 Saya sudah tiba, Check-in' + (data.session ? ` — ${data.session.name}` : '')),
         h('div', { class: 'small', style: { opacity: .75, marginTop: '.5rem' } }, 'Tekan tombol di atas saat sudah di lokasi, lalu scan QR yang tampil di layar acara.'));
     } else if (hybridSelf) {
       statusBox.replaceChildren(h('div', { class: 'card', style: { maxWidth: '380px', margin: '0 auto', background: '#fff', color: '#0f172a' } },
@@ -61,12 +89,15 @@ export default async function ticket(root, { params }) {
 
   function success(info) {
     checkedAt = info.checked_in_at || new Date().toISOString();
-    renderStatus();
+    renderStatus(); reloadTicket();
     if (navigator.vibrate) navigator.vibrate([80, 40, 80]);
     modal({
       title: 'Check-in berhasil',
       body: h('div', { class: 'result-ok' }, h('div', { class: 'icon' }, '✓'),
-        h('h2', null, info.name || p.name), h('p', null, `Tercatat hadir pukul ${fmtTime(checkedAt)}`),
+        h('h2', null, info.name || p.name),
+        info.session ? h('p', { style: { fontWeight: 700 } }, '🗓 ' + info.session.name) : null,
+        h('p', null, `Tercatat hadir pukul ${fmtTime(checkedAt)}`),
+        info.is_late ? h('p', null, h('span', { class: 'badge warn', style: { fontSize: '.95rem' } }, '⏰ Terlambat')) : null,
         h('p', { class: 'muted' }, ev.settings?.success_message || 'Selamat datang, terima kasih atas kehadiran Anda.')),
       actions: [{ label: 'Tutup', class: 'primary' }],
     });
@@ -127,10 +158,10 @@ export default async function ticket(root, { params }) {
     }
   }
 
-  page.append(statusBox, canvas,
+  page.append(statusBox, sessionsBox, canvas,
     h('div', { class: 'row', style: { justifyContent: 'center', marginTop: '1rem' } },
       h('button', { class: 'btn', onclick: () => canvas.toBlob((b) => downloadBlob(b, `tiket_${safeFileName(p.name)}.png`)) }, '⬇ Simpan tiket')),
     h('p', { class: 'center small', style: { opacity: .7, marginTop: '1rem' } }, 'Perbesar kecerahan layar saat menunjukkan QR kepada panitia.'));
-  renderStatus();
+  renderStatus(); renderSessions();
   await renderTicket(p, ev, canvas);
 }

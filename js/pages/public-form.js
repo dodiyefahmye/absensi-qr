@@ -24,7 +24,8 @@ export default async function publicForm(root, { params, query }) {
   const hero = h('div', { class: 't-hero' + (t.banner_url ? ' has-banner' : ''), style: t.banner_url ? { backgroundImage: `url("${t.banner_url}")` } : null },
     t.logo_url ? h('img', { class: 't-logo', src: t.logo_url, alt: 'Logo' }) : null,
     h('h1', null, ev.name),
-    meta ? h('div', { class: 'meta' }, meta) : null);
+    meta ? h('div', { class: 'meta' }, meta) : null,
+    ev.session ? h('div', { class: 'meta', style: { marginTop: '.4rem', fontWeight: 700, fontSize: '1rem' } }, '🗓 ' + ev.session.name) : null);
   const card = h('div', { class: 't-card' });
   page.append(hero, h('div', { class: 't-accent' }), h('div', { style: { padding: '0 1rem' } }, card), h('div', { class: 't-footer' }, ev.organizer || ''));
 
@@ -37,8 +38,14 @@ export default async function publicForm(root, { params, query }) {
     return;
   }
 
+  if (ev.has_sessions && !ev.session) {
+    card.append(h('div', { class: 'result-ok' }, h('div', { class: 'icon warn' }, '🗓'), h('h2', null, 'Belum ada sesi berlangsung'),
+      h('p', null, 'Absensi dibuka sesuai jadwal sesi. Silakan scan ulang QR di layar saat sesi dimulai.')));
+    return;
+  }
+  // status "sudah mengisi" diingat per sesi
   const prev = JSON.parse(localStorage.getItem(storeKey) || 'null');
-  if (prev && !query.again) return success(prev);
+  if (prev && !query.again && (prev.session_id || null) === (ev.session?.id || null)) return success(prev);
 
   if (ev.mode === 'hybrid' && !query.walkin) return hybridChooser();
   showForm();
@@ -57,7 +64,7 @@ export default async function publicForm(root, { params, query }) {
         try {
           const r = await api.selfCheckIn(mine.token, params.token, query.c || null, deviceId());
           if (r.status === 'ok' || r.status === 'duplicate') {
-            const info = { name: r.name || mine.name, at: r.checked_in_at, dup: r.status === 'duplicate' };
+            const info = { name: r.name || mine.name, at: r.checked_in_at, dup: r.status === 'duplicate', late: r.is_late, session: r.session?.name, session_id: ev.session?.id || null };
             localStorage.setItem(storeKey, JSON.stringify(info));
             return success(info);
           }
@@ -113,7 +120,7 @@ export default async function publicForm(root, { params, query }) {
         const mem = {};
         for (const f of ev.form_schema) if (['text', 'email', 'tel', 'number', 'select'].includes(f.type) && data[f.key]) mem[f.key] = data[f.key];
         localStorage.setItem('form-memory', JSON.stringify(mem));
-        const info = { name: r.name, at: r.checked_in_at };
+        const info = { name: r.name, at: r.checked_in_at, late: r.is_late, session: r.session?.name, session_id: ev.session?.id || null };
         localStorage.setItem(storeKey, JSON.stringify(info));
         return success(info);
       }
@@ -125,6 +132,7 @@ export default async function publicForm(root, { params, query }) {
         too_large: 'Ukuran data terlalu besar (foto/tanda tangan). Coba lagi.',
         invalid: 'Formulir tidak valid.',
         walkin_disabled: 'Pendaftaran tamu tidak terdaftar sedang ditutup. Silakan ke meja registrasi panitia.',
+        no_session: 'Belum ada sesi absensi yang sedang berlangsung.',
       }[r.status] || 'Gagal mengirim.';
       errBox.textContent = msg;
     } catch (err) {
@@ -140,7 +148,9 @@ export default async function publicForm(root, { params, query }) {
       h('div', { class: 'icon' }, '✓'),
       h('h2', null, info.dup ? 'Sudah tercatat sebelumnya' : 'Kehadiran tercatat'),
       h('p', { style: { fontSize: '1.15rem', fontWeight: 700 } }, info.name),
+      info.session ? h('p', { style: { fontWeight: 700 } }, '🗓 ' + info.session) : null,
       h('p', { style: { color: '#64748b' } }, `Pukul ${fmtTime(info.at)}`),
+      info.late ? h('p', null, h('span', { class: 'badge warn', style: { fontSize: '.95rem' } }, '⏰ Terlambat')) : null,
       h('p', null, ev.settings?.success_message || 'Terima kasih atas kehadiran Anda.'),
       h('a', { href: `#/f/${params.token}?again=1${query.c ? '&c=' + encodeURIComponent(query.c) : ''}`, class: 'small', style: { color: '#64748b' }, onclick: () => localStorage.removeItem(storeKey) }, ev.mode === 'hybrid' ? 'Check-in untuk orang lain' : 'Isi untuk orang lain')));
   }

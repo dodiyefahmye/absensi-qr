@@ -3,21 +3,24 @@ import * as api from '../lib/api.js';
 import { h, errMsg, fmtTime, fmtDate, debounce } from '../lib/ui.js';
 import { applyTheme, normalizeTheme, categoryColor, contrastInk } from '../lib/theme.js';
 import { displayValue } from '../lib/form.js';
+import { activeSession, nextSession, sortSessions, inSession, fmtSessionRange, sessionStatus, STATUS_LABEL } from '../lib/sessions.js';
 
 const EMPTY = '(kosong)';
 
 export default async function monitor(root, { params }) {
-  let ev, people = [], atts = [];
+  let ev, people = [], atts = [], allPeople = [], allAtts = [], sessions = [];
   try {
     ev = await api.getEvent(params.id);
-    [people, atts] = await Promise.all([api.listParticipants(ev.id), api.listAttendances(ev.id)]);
+    let ss;
+    [allPeople, allAtts, ss] = await Promise.all([api.listParticipants(ev.id), api.listAttendances(ev.id), api.listSessions(ev.id).catch(() => [])]);
+    sessions = sortSessions(ss);
   } catch (e) {
     root.appendChild(h('div', { class: 'container narrow' }, h('div', { class: 'card center', style: { marginTop: '10vh' } },
       h('h2', null, 'Gagal memuat'), h('p', { class: 'muted' }, errMsg(e)), h('a', { class: 'btn', href: '#/' }, 'Kembali'))));
     return;
   }
   const theme = normalizeTheme(ev.theme);
-  const hasList = people.length > 0; // mode QR Acara tanpa daftar peserta → hanya hitung yang hadir
+  const hasList = allPeople.length > 0; // mode QR Acara tanpa daftar peserta → hanya hitung yang hadir
   const prefKey = 'monitor:' + ev.id;
   const pref = (() => { try { return JSON.parse(localStorage.getItem(prefKey)) || {}; } catch (e) { return {}; } })();
   const savePref = () => { try { localStorage.setItem(prefKey, JSON.stringify(pref)); } catch (e) { /* */ } };
@@ -31,6 +34,25 @@ export default async function monitor(root, { params }) {
   let listTab = hasList ? 'belum' : 'hadir';
   let big = !!pref.big;
   const flash = new Set();
+  let sessionMode = pref.session && (pref.session === 'auto' || sessions.some((x) => x.id === pref.session)) ? pref.session : 'auto';
+  function curSession() {
+    if (!sessions.length) return null;
+    if (sessionMode !== 'auto') return sessions.find((x) => x.id === sessionMode) || null;
+    return activeSession(sessions) || nextSession(sessions) || sessions[sessions.length - 1];
+  }
+  function applySession() {
+    const cur = curSession();
+    people = sessions.length ? allPeople.filter((p) => inSession(p, cur)) : allPeople;
+    atts = sessions.length ? allAtts.filter((a) => (a.session_id || null) === (cur?.id || null)) : allAtts;
+  }
+  const sessionSel = h('select', { 'aria-label': 'Sesi', onchange: () => { sessionMode = sessionSel.value; pref.session = sessionMode; savePref(); selected = null; render(); } });
+  function renderSessionSel() {
+    const act = activeSession(sessions);
+    sessionSel.replaceChildren(
+      h('option', { value: 'auto' }, `Otomatis — ${act ? act.name : 'sesi terdekat'}`),
+      ...sessions.map((x) => h('option', { value: x.id }, `${x.name} · ${fmtSessionRange(x)}`)));
+    sessionSel.value = sessionMode;
+  }
 
   const groupOf = (rec) => {
     if (groupBy === '__category') return rec.category || EMPTY;
@@ -47,6 +69,11 @@ export default async function monitor(root, { params }) {
   root.appendChild(page);
 
   const clock = h('span', { class: 'mono' });
+  const headSub = h('div', { class: 'small', style: { opacity: .9 } });
+  function renderHeadSub() {
+    const cur = curSession();
+    headSub.textContent = ['Monitor kehadiran', cur ? `${cur.name} (${STATUS_LABEL[sessionStatus(cur)].replace('● ', '')})` : (ev.event_date ? fmtDate(ev.event_date) : '')].filter(Boolean).join(' · ');
+  }
   const live = h('span', { class: 'row', style: { gap: '.35rem' } }, h('span', { class: 'dot warn' }), h('span', null, 'Menghubungkan…'));
   const groupSel = h('select', { 'aria-label': 'Kelompokkan berdasarkan', onchange: () => { groupBy = groupSel.value; selected = null; pref.groupBy = groupBy; savePref(); render(); } },
     groupFields.map((g) => h('option', { value: g.key }, g.label)));
@@ -72,11 +99,12 @@ export default async function monitor(root, { params }) {
       theme.logo_url ? h('img', { src: theme.logo_url, alt: '' }) : null,
       h('div', { class: 'mh-title' },
         h('div', { class: 'monitor-title' }, ev.name),
-        h('div', { class: 'small', style: { opacity: .9 } }, ['Monitor kehadiran', ev.event_date ? fmtDate(ev.event_date) : ''].filter(Boolean).join(' · '))),
+        headSub),
       h('div', { class: 'mh-tools' }, live, clock,
       h('button', { class: 'btn sm', title: 'Layar penuh', onclick: () => document.fullscreenElement ? document.exitFullscreen() : page.requestFullscreen?.() }, '⛶ Layar penuh'))),
     h('div', { class: 'monitor-body' },
       h('div', { class: 'monitor-controls row' },
+        sessions.length ? h('label', { class: 'row small', style: { gap: '.4rem', flex: '1 1 320px' } }, h('b', null, '🗓 Sesi:'), sessionSel) : null,
         h('label', { class: 'row small', style: { gap: '.4rem', flex: '1 1 260px' } }, h('b', null, 'Kelompokkan:'), groupSel),
         h('label', { class: 'row small', style: { gap: '.4rem', flex: '1 1 260px' } }, h('b', null, 'Urutkan:'), sortSel),
         bigBtn),
@@ -184,40 +212,49 @@ export default async function monitor(root, { params }) {
     })), list.length > 600 ? h('p', { class: 'small muted center' }, `…dan ${list.length - 600} lainnya (gunakan pencarian)`) : null);
   }
 
-  function render() { renderSummary(); renderGroups(); renderDetail(); }
+  function render() { applySession(); renderHeadSub(); renderSummary(); renderGroups(); renderDetail(); }
   search.addEventListener('input', debounce(renderDetail, 150));
 
   // ---------- realtime ----------
   const refresh = debounce(render, 150);
   const unsub = api.subscribeEvent(ev.id, {
     attendance: (type, row, old) => {
-      if (type === 'DELETE') atts = atts.filter((a) => a.id !== old?.id);
+      if (type === 'DELETE') allAtts = allAtts.filter((a) => a.id !== old?.id);
       else if (row) {
-        const i = atts.findIndex((a) => a.id === row.id);
-        if (i >= 0) atts[i] = row; else atts.unshift(row);
-        const rec = hasList ? people.find((p) => p.id === row.participant_id) : row;
+        const i = allAtts.findIndex((a) => a.id === row.id);
+        if (i >= 0) allAtts[i] = row; else allAtts.unshift(row);
+        const rec = hasList ? allPeople.find((p) => p.id === row.participant_id) : row;
         if (rec) { const g = groupOf(rec); flash.add(g); setTimeout(() => { flash.delete(g); renderGroups(); }, 2500); }
       }
       refresh();
     },
     participant: (type, row, old) => {
-      if (type === 'DELETE') people = people.filter((p) => p.id !== old?.id);
-      else if (row) { const i = people.findIndex((p) => p.id === row.id); if (i >= 0) people[i] = row; else people.push(row); }
+      if (type === 'DELETE') allPeople = allPeople.filter((p) => p.id !== old?.id);
+      else if (row) { const i = allPeople.findIndex((p) => p.id === row.id); if (i >= 0) allPeople[i] = row; else allPeople.push(row); }
       refresh();
     },
+    sessions: async () => { try { sessions = sortSessions(await api.listSessions(ev.id)); renderSessionSel(); refresh(); } catch (e) { /* */ } },
     status: (s) => {
       const ok = s === 'SUBSCRIBED';
       live.replaceChildren(h('span', { class: 'dot ' + (ok ? 'ok' : 'err') }), h('span', null, ok ? 'Realtime' : 'Menyambung ulang…'));
     },
   });
-  const tick = () => { clock.textContent = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }); };
+  let lastSid = null;
+  const tick = () => {
+    clock.textContent = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+    // mode otomatis: pindah sesi sesuai jam
+    const sid = curSession()?.id || null;
+    if (lastSid !== null && sid !== lastSid) { renderSessionSel(); render(); }
+    lastSid = sid;
+  };
   tick();
   const clockTimer = setInterval(tick, 10000);
   // sinkron ulang berkala jika ada event realtime yang terlewat
   const resync = setInterval(async () => {
-    try { [people, atts] = await Promise.all([api.listParticipants(ev.id), api.listAttendances(ev.id)]); render(); } catch (e) { /* */ }
+    try { [allPeople, allAtts] = await Promise.all([api.listParticipants(ev.id), api.listAttendances(ev.id)]); render(); } catch (e) { /* */ }
   }, 120000);
 
+  renderSessionSel();
   render();
   return () => { unsub(); clearInterval(clockTimer); clearInterval(resync); };
 }

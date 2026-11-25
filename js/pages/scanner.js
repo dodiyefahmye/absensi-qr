@@ -5,10 +5,14 @@ import { applyTheme, normalizeTheme, categoryColor, contrastInk } from '../lib/t
 import { parseScanned } from '../lib/qr.js';
 import { loadScanner } from '../lib/vendor.js';
 import { queue, cache } from '../lib/offline.js';
+import { activeSession, sortSessions, inSession, fmtSessionRange } from '../lib/sessions.js';
 
 export default async function scanner(root, { params }) {
   const eventId = params.id;
   let ev, people = [], byToken = new Map(), byId = new Map(), attended = new Map(), recent = [];
+  let allAtts = [], sessions = [], pendingItems = [];
+  const modeKey = 'scan-session:' + eventId;
+  let sessionMode = localStorage.getItem(modeKey) || 'auto'; // 'auto' atau id sesi
   let qr = null, cameras = [], camIndex = 0, running = false;
   let lastToken = '', lastTime = 0, overlayTimer = null, busy = false, sessionCount = 0;
   let wakeLock = null, audio = null, flushing = false;
@@ -18,11 +22,9 @@ export default async function scanner(root, { params }) {
 
   // ---------- muat data (online → cache, offline → dari cache) ----------
   try {
-    const [e, p, a] = await Promise.all([api.getEvent(eventId), api.listParticipants(eventId), api.listAttendances(eventId)]);
-    ev = e; people = p;
-    a.forEach((x) => x.participant_id && attended.set(x.participant_id, x));
-    recent = a.slice(0, 15);
-    cache.set('scan:' + eventId, { ev, people, attendances: a.slice(0, 3000), at: Date.now() }).catch(() => {});
+    const [e, p, a, ss] = await Promise.all([api.getEvent(eventId), api.listParticipants(eventId), api.listAttendances(eventId), api.listSessions(eventId).catch(() => [])]);
+    ev = e; people = p; allAtts = a; sessions = sortSessions(ss);
+    cache.set('scan:' + eventId, { ev, people, attendances: a.slice(0, 5000), sessions, at: Date.now() }).catch(() => {});
   } catch (err) {
     const c = await cache.get('scan:' + eventId).catch(() => null);
     if (!c) {
@@ -30,13 +32,30 @@ export default async function scanner(root, { params }) {
         h('h2', null, 'Tidak dapat memuat acara'), h('p', { class: 'muted' }, errMsg(err)), h('a', { class: 'btn', href: '#/' }, 'Kembali'))));
       return;
     }
-    ev = c.ev; people = c.people;
-    c.attendances.forEach((x) => x.participant_id && attended.set(x.participant_id, x));
-    recent = c.attendances.slice(0, 15);
+    ev = c.ev; people = c.people; allAtts = c.attendances || []; sessions = sortSessions(c.sessions || []);
     toast('Mode offline: memakai data tersimpan', 'warn');
   }
   for (const p of people) { byToken.set(p.qr_token, p); byId.set(p.id, p); }
-  (await queue.forEvent(eventId).catch(() => [])).forEach((q) => { const p = byToken.get(q.token) || byId.get(q.participant_id); if (p && !attended.has(p.id)) attended.set(p.id, { pending: true, checked_in_at: q.checked_at }); });
+  pendingItems = await queue.forEvent(eventId).catch(() => []);
+
+  // ---------- sesi ----------
+  const hasSessions = () => sessions.length > 0;
+  function curSession() {
+    if (!hasSessions()) return null;
+    if (sessionMode !== 'auto') return sessions.find((x) => x.id === sessionMode) || activeSession(sessions);
+    return activeSession(sessions);
+  }
+  const sameSession = (sid) => !hasSessions() || (sid || null) === (curSession()?.id || null);
+  function rebuildAttended() {
+    attended = new Map();
+    for (const x of allAtts) if (x.participant_id && sameSession(x.session_id)) attended.set(x.participant_id, x);
+    for (const q of pendingItems) {
+      const p = byToken.get(q.token) || byId.get(q.participant_id);
+      if (p && sameSession(q.session_id) && !attended.has(p.id)) attended.set(p.id, { pending: true, checked_in_at: q.checked_at, session_id: q.session_id });
+    }
+    recent = allAtts.filter((x) => sameSession(x.session_id)).sort((a, b) => new Date(b.checked_in_at) - new Date(a.checked_in_at)).slice(0, 15);
+  }
+  rebuildAttended();
 
   const theme = normalizeTheme(ev.theme);
   const resetMs = Number(ev.settings?.scan_reset_ms) || 1600;
@@ -80,6 +99,30 @@ export default async function scanner(root, { params }) {
   const results = h('div', { class: 'search-results' });
   const recentList = h('ul', { class: 'recent' });
 
+  // pilihan sesi (otomatis sesuai jam / manual)
+  const sessionSel = h('select', { 'aria-label': 'Sesi absensi', style: { flex: '1 1 260px', maxWidth: '420px' }, onchange: () => {
+    sessionMode = sessionSel.value; localStorage.setItem(modeKey, sessionMode);
+    lastToken = ''; // sesi berganti: QR yang sama boleh langsung dipindai lagi
+    rebuildAttended(); renderSessionBar(); updateCount(); renderRecent();
+  } });
+  const sessionInfo = h('span', { class: 'small', style: { fontWeight: 600 } });
+  const sessionBar = h('div', { class: 'scan-session' + (hasSessions() ? '' : ' hidden') }, h('span', { style: { fontWeight: 700 } }, '🗓 Sesi:'), sessionSel, sessionInfo);
+  function renderSessionBar() {
+    sessionBar.classList.toggle('hidden', !hasSessions());
+    if (!hasSessions()) return;
+    const act = activeSession(sessions);
+    sessionSel.replaceChildren(
+      h('option', { value: 'auto' }, `Otomatis sesuai jam — ${act ? act.name : 'tidak ada sesi berlangsung'}`),
+      ...sessions.map((x) => h('option', { value: x.id }, `${x.name} (${fmtSessionRange(x)})`)));
+    if (sessionMode !== 'auto' && !sessions.some((x) => x.id === sessionMode)) sessionMode = 'auto';
+    sessionSel.value = sessionMode;
+    const cur = curSession();
+    sessionInfo.textContent = cur
+      ? (cur.late_after ? `Terlambat setelah ${new Date(cur.late_after).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}` : '')
+      : '⚠️ Tidak ada sesi berlangsung — pilih sesi secara manual';
+    sessionBar.classList.toggle('warn', !cur);
+  }
+
   page.append(
     h('div', { class: 'scan-top' },
       h('a', { class: 'btn sm', href: '#/', title: 'Kembali' }, '←'),
@@ -87,6 +130,7 @@ export default async function scanner(root, { params }) {
       h('div', { class: 'title', style: { flex: 1, minWidth: 0 } }, ev.name, h('div', { class: 'small', style: { opacity: .85, fontWeight: 500 } }, 'Scanner absensi')),
       h('a', { class: 'btn sm', href: `#/event/${ev.id}/monitor`, title: 'Monitor kehadiran per kategori' }, '📈'),
       h('button', { class: 'btn sm', title: 'Layar penuh', onclick: () => document.fullscreenElement ? document.exitFullscreen() : page.requestFullscreen?.() }, '⛶')),
+    sessionBar,
     h('div', { class: 'scan-counter' },
       h('span', null, 'Hadir'), countEl,
       h('span', { class: 'spacer' }),
@@ -98,7 +142,8 @@ export default async function scanner(root, { params }) {
         h('div', { class: 'card' }, h('h3', null, 'Terakhir masuk'), recentList))));
 
   function updateCount() {
-    const total = people.length;
+    const cur = curSession();
+    const total = hasSessions() ? people.filter((p) => inSession(p, cur)).length : people.length;
     countEl.textContent = total ? `${attended.size} / ${total}` : String(attended.size);
     sessEl.textContent = `· Perangkat ini: ${sessionCount}`;
   }
@@ -206,7 +251,9 @@ export default async function scanner(root, { params }) {
     if (!navigator.onLine) return offlineCheckIn(local, token, label);
 
     try {
-      const r = await api.checkIn({ eventId, token, participantId, deviceLabel: label, clientId: uuid() });
+      // otomatis: server menentukan sesi sesuai jam; manual: kirim sesi yang dipilih
+      const sessionId = hasSessions() && sessionMode !== 'auto' ? curSession()?.id || null : null;
+      const r = await api.checkIn({ eventId, token, participantId, deviceLabel: label, clientId: uuid(), sessionId });
       handleResult(r);
     } catch (e) {
       if (/fetch|network|Failed/i.test(String(e.message || e))) return offlineCheckIn(local, token, label);
@@ -214,21 +261,35 @@ export default async function scanner(root, { params }) {
     }
   }
 
+  function upsertAtt(row) {
+    if (!row) return;
+    const i = allAtts.findIndex((x) => x.id === row.id);
+    if (i >= 0) allAtts[i] = row; else allAtts.unshift(row);
+    if (row.participant_id && sameSession(row.session_id)) attended.set(row.participant_id, row);
+    if (sameSession(row.session_id)) pushRecent(row);
+  }
+
   function handleResult(r) {
     const p = r.participant;
     switch (r.status) {
-      case 'ok':
+      case 'ok': {
         sessionCount++;
-        if (p) { attended.set(p.id, r.attendance); if (!byId.has(p.id)) { byId.set(p.id, p); byToken.set(p.qr_token, p); } }
-        pushRecent(r.attendance);
-        showOverlay('ok', '✓', p?.name || 'Berhasil', ev.settings?.success_message || 'Kehadiran tercatat', p?.category);
+        if (p && !byId.has(p.id)) { byId.set(p.id, p); byToken.set(p.qr_token, p); }
+        upsertAtt(r.attendance);
+        const sesi = r.session ? `${r.session.name} · ` : '';
+        const late = r.attendance?.is_late ? '⏰ TERLAMBAT · ' : '';
+        showOverlay('ok', r.attendance?.is_late ? '⏰' : '✓', p?.name || 'Berhasil', late + sesi + (ev.settings?.success_message || 'Kehadiran tercatat'), p?.category);
         break;
+      }
       case 'duplicate': {
         const by = r.scanned_by_name ? ` oleh ${r.scanned_by_name}` : '';
         const dev = r.attendance?.source === 'self' ? ' (check-in mandiri)' : r.attendance?.device_label ? ` (${r.attendance.device_label})` : '';
-        showOverlay('dup', '!', p?.name || 'Sudah absen', `Sudah absen pukul ${fmtTime(r.attendance?.checked_in_at)}${by}${dev}`, p?.category);
+        const sesi = r.session ? ` di sesi "${r.session.name}"` : '';
+        showOverlay('dup', '!', p?.name || 'Sudah absen', `Sudah absen${sesi} pukul ${fmtTime(r.attendance?.checked_in_at)}${by}${dev}`, p?.category);
         break;
       }
+      case 'no_session': showOverlay('err', '🗓', 'Tidak ada sesi berlangsung', 'Pilih sesi secara manual di bagian atas, atau atur jam sesi di tab Sesi', p?.category); break;
+      case 'not_in_session': showOverlay('err', '✕', p?.name || 'Bukan peserta sesi ini', `Tidak terdaftar di sesi "${r.session?.name || ''}"`, p?.category); break;
       case 'closed': showOverlay('err', '🔒', 'Absensi ditutup', 'Buka absensi di Pengaturan acara'); break;
       case 'wrong_event': showOverlay('err', '✕', 'Salah acara', 'QR ini milik acara lain'); break;
       case 'forbidden': showOverlay('err', '✕', 'Tidak punya akses', 'Akun Anda bukan anggota acara ini'); break;
@@ -239,10 +300,14 @@ export default async function scanner(root, { params }) {
 
   async function offlineCheckIn(p, token, label) {
     if (!p) return showOverlay('err', '✕', 'Tidak ditemukan', 'Offline: peserta tidak ada di data tersimpan');
-    if (attended.has(p.id)) return showOverlay('dup', '!', p.name, 'Sudah tercatat hadir', p.category);
-    const item = { client_id: uuid(), event_id: eventId, token: p.qr_token, participant_id: p.id, device_label: label, checked_at: new Date().toISOString() };
+    const cur = curSession();
+    if (hasSessions() && !cur) return showOverlay('err', '🗓', 'Tidak ada sesi berlangsung', 'Pilih sesi secara manual di bagian atas');
+    if (hasSessions() && !inSession(p, cur)) return showOverlay('err', '✕', p.name, `Tidak terdaftar di sesi "${cur.name}"`, p.category);
+    if (attended.has(p.id)) return showOverlay('dup', '!', p.name, 'Sudah tercatat hadir' + (cur ? ` di sesi "${cur.name}"` : ''), p.category);
+    const item = { client_id: uuid(), event_id: eventId, token: p.qr_token, participant_id: p.id, device_label: label, checked_at: new Date().toISOString(), session_id: cur?.id || null };
     await queue.add(item);
-    const a = { pending: true, name: p.name, category: p.category, checked_in_at: item.checked_at, device_label: label };
+    pendingItems.push(item);
+    const a = { pending: true, name: p.name, category: p.category, checked_in_at: item.checked_at, device_label: label, session_id: item.session_id };
     attended.set(p.id, a); sessionCount++;
     pushRecent(a); updateCount(); updatePending();
     showOverlay('off', '✓', p.name, 'Tersimpan offline — akan disinkronkan otomatis', p.category);
@@ -260,12 +325,13 @@ export default async function scanner(root, { params }) {
       const items = await queue.forEvent(eventId);
       for (const it of items) {
         try {
-          const r = await api.checkIn({ eventId, token: it.token, deviceLabel: it.device_label, clientId: it.client_id, checkedAt: it.checked_at });
+          const r = await api.checkIn({ eventId, token: it.token, deviceLabel: it.device_label, clientId: it.client_id, checkedAt: it.checked_at, sessionId: it.session_id || null });
           await queue.remove(it.client_id);
-          if (r?.attendance && r.participant) attended.set(r.participant.id, r.attendance);
+          pendingItems = pendingItems.filter((x) => x.client_id !== it.client_id);
+          if (r?.attendance) upsertAtt(r.attendance);
         } catch (e) { break; }
       }
-      if (items.length) { recent = recent.filter((r) => !r.pending); renderRecent(); updateCount(); }
+      if (items.length) { rebuildAttended(); renderRecent(); updateCount(); }
     } finally { flushing = false; updatePending(); }
   }
 
@@ -488,13 +554,13 @@ export default async function scanner(root, { params }) {
   const unsub = api.subscribeEvent(eventId, {
     attendance: (type, row, old) => {
       if (type === 'DELETE') {
-        for (const [k, v] of attended) if (v.id && v.id === old?.id) attended.delete(k);
-        recent = recent.filter((r) => r.id !== old?.id); renderRecent();
-      } else if (row) {
-        if (row.participant_id) attended.set(row.participant_id, row);
-        pushRecent(row);
-      }
+        allAtts = allAtts.filter((x) => x.id !== old?.id);
+        rebuildAttended(); renderRecent();
+      } else if (row) upsertAtt(row);
       updateCount();
+    },
+    sessions: async () => {
+      try { sessions = sortSessions(await api.listSessions(eventId)); rebuildAttended(); renderSessionBar(); updateCount(); renderRecent(); } catch (e) { /* */ }
     },
     participant: (type, row, old) => {
       if (type === 'DELETE') { const p = byId.get(old?.id); if (p) { byToken.delete(p.qr_token); byId.delete(p.id); people = people.filter((x) => x.id !== p.id); } }
@@ -521,15 +587,22 @@ export default async function scanner(root, { params }) {
   document.addEventListener('keydown', onKey);
   document.addEventListener('visibilitychange', onVis);
   const flushTimer = setInterval(flushQueue, 15000);
+  let lastSid = curSession()?.id || null;
+  const sessionTimer = setInterval(() => {
+    if (!hasSessions()) return;
+    const sid = curSession()?.id || null;
+    renderSessionBar();
+    if (sid !== lastSid) { lastSid = sid; rebuildAttended(); updateCount(); renderRecent(); if (sid) toast(`Sesi aktif: ${curSession().name}`, 'ok'); }
+  }, 20000);
 
-  updateCount(); renderRecent(); renderCamBtns(); renderCamOpts(); updatePending();
+  renderSessionBar(); updateCount(); renderRecent(); renderCamBtns(); renderCamOpts(); updatePending();
   if (!navigator.onLine) onOffline();
   if (localStorage.getItem('scan-autostart') === '1') startCamera();
 
   return () => {
     if (guideRO) guideRO.disconnect(); else window.removeEventListener('resize', sizeGuide);
     unsub();
-    clearInterval(flushTimer); clearTimeout(overlayTimer);
+    clearInterval(flushTimer); clearInterval(sessionTimer); clearTimeout(overlayTimer);
     window.removeEventListener('online', onOnline);
     window.removeEventListener('offline', onOffline);
     document.removeEventListener('keydown', onKey);

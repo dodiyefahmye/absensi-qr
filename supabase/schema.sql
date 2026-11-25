@@ -78,7 +78,21 @@ create table if not exists public.attendances (
   device_id       text,
   source          text not null default 'scan' check (source in ('scan', 'form', 'manual', 'self')),
   client_id       text unique,
-  constraint attendances_event_participant_key unique (event_id, participant_id)
+  session_id      uuid,
+  is_late         boolean not null default false
+);
+
+-- Sesi dalam satu acara (mis. Hari 1 Pagi, Hari 1 Sore). Satu e-ticket berlaku untuk semua sesi.
+create table if not exists public.event_sessions (
+  id          uuid primary key default gen_random_uuid(),
+  event_id    uuid not null references public.events(id) on delete cascade,
+  name        text not null,
+  starts_at   timestamptz not null,
+  ends_at     timestamptz not null,
+  late_after  timestamptz,                       -- lewat jam ini = terlambat (opsional)
+  categories  jsonb not null default '[]'::jsonb, -- kosong = semua peserta wajib ikut sesi ini
+  created_at  timestamptz not null default now(),
+  constraint event_sessions_time_check check (ends_at > starts_at)
 );
 
 create table if not exists public.event_templates (
@@ -107,6 +121,20 @@ create table if not exists public.pembuat_acara (
   catatan    text,
   created_at timestamptz not null default now()
 );
+
+-- Migrasi: absensi per sesi
+alter table public.attendances add column if not exists session_id uuid;
+alter table public.attendances add column if not exists is_late boolean not null default false;
+do $$ begin
+  alter table public.attendances add constraint attendances_session_fk
+    foreign key (session_id) references public.event_sessions(id) on delete cascade;
+exception when duplicate_object then null; end $$;
+alter table public.attendances drop constraint if exists attendances_event_participant_key;
+-- Satu peserta hanya sekali per sesi (atau sekali per acara jika acara tanpa sesi).
+-- Tamu tanpa daftar (participant_id kosong) tidak dibatasi indeks ini.
+create unique index if not exists attendances_once_per_session
+  on public.attendances (event_id, participant_id, (coalesce(session_id, '00000000-0000-0000-0000-000000000000'::uuid)));
+create index if not exists event_sessions_event_idx on public.event_sessions(event_id, starts_at);
 
 create index if not exists participants_event_idx on public.participants(event_id);
 create index if not exists participants_name_idx  on public.participants(event_id, lower(name));
@@ -158,6 +186,33 @@ returns boolean language sql stable as $$
              then coalesce(e.settings->'self_checkin'->'categories', '[]'::jsonb) ? coalesce(p.category, '')
            else false
          end;
+$$;
+
+-- Sesi yang sedang berlangsung pada waktu tertentu (null jika tidak ada)
+create or replace function public.active_session(p_event_id uuid, p_at timestamptz default now())
+returns public.event_sessions language sql stable as $$
+  select * from public.event_sessions
+  where event_id = p_event_id and p_at >= starts_at and p_at <= ends_at
+  order by starts_at limit 1;
+$$;
+
+create or replace function public.event_has_sessions(p_event_id uuid)
+returns boolean language sql stable as $$
+  select exists (select 1 from public.event_sessions where event_id = p_event_id);
+$$;
+
+-- Apakah peserta termasuk sesi ini? (kategori kosong = semua)
+create or replace function public.in_session(p public.participants, s public.event_sessions)
+returns boolean language sql stable as $$
+  select s.id is null
+      or jsonb_array_length(coalesce(s.categories, '[]'::jsonb)) = 0
+      or coalesce(s.categories, '[]'::jsonb) ? coalesce(p.category, '');
+$$;
+
+create or replace function public.session_json(s public.event_sessions)
+returns jsonb language sql stable as $$
+  select case when s.id is null then null else
+    jsonb_build_object('id', s.id, 'name', s.name, 'starts_at', s.starts_at, 'ends_at', s.ends_at, 'late_after', s.late_after) end;
 $$;
 
 create or replace function public.event_is_open(e public.events, p_at timestamptz default now())
@@ -244,7 +299,8 @@ alter table public.event_members   enable row level security;
 alter table public.participants    enable row level security;
 alter table public.attendances     enable row level security;
 alter table public.event_templates enable row level security;
-alter table public.pembuat_acara   enable row level security;  -- hanya bisa dikelola dari dashboard Supabase
+alter table public.pembuat_acara   enable row level security;
+alter table public.event_sessions  enable row level security;  -- hanya bisa dikelola dari dashboard Supabase
 
 -- profiles
 drop policy if exists profiles_select on public.profiles;
@@ -302,6 +358,14 @@ create policy attendances_write on public.attendances for all to authenticated
 
 -- templates
 drop policy if exists templates_all on public.event_templates;
+drop policy if exists sessions_select on public.event_sessions;
+create policy sessions_select on public.event_sessions for select to authenticated
+  using (public.is_event_member(event_id));
+drop policy if exists sessions_write on public.event_sessions;
+create policy sessions_write on public.event_sessions for all to authenticated
+  using (public.is_event_member(event_id, array['owner','admin']))
+  with check (public.is_event_member(event_id, array['owner','admin']));
+
 create policy templates_all on public.event_templates for all to authenticated
   using (owner_id = auth.uid()) with check (owner_id = auth.uid());
 
@@ -309,21 +373,25 @@ create policy templates_all on public.event_templates for all to authenticated
 -- 5. RPC (dipanggil dari aplikasi)
 -- ---------------------------------------------------------------------
 
--- 5a. Check-in oleh panitia (scan QR peserta / pilih manual). Atomik & anti-duplikat.
+-- 5a. Check-in oleh panitia (scan QR peserta / pilih manual). Atomik & anti-duplikat per sesi.
+drop function if exists public.check_in(uuid, text, uuid, text, text, timestamptz);
 create or replace function public.check_in(
   p_event_id uuid,
   p_qr_token text default null,
   p_participant_id uuid default null,
   p_device_label text default null,
   p_client_id text default null,
-  p_checked_at timestamptz default null
+  p_checked_at timestamptz default null,
+  p_session_id uuid default null          -- null = sesi yang sedang berlangsung
 ) returns jsonb language plpgsql security definer set search_path = public as $$
 declare
   v_event public.events;
   v_p     public.participants;
   v_att   public.attendances;
+  v_s     public.event_sessions;
   v_at    timestamptz := now();
   v_by    text;
+  v_late  boolean := false;
 begin
   if auth.uid() is null or not public.is_event_member(p_event_id) then
     return jsonb_build_object('status', 'forbidden');
@@ -339,7 +407,8 @@ begin
     select * into v_att from public.attendances where client_id = p_client_id;
     if found then
       select * into v_p from public.participants where id = v_att.participant_id;
-      return jsonb_build_object('status', 'ok', 'participant', to_jsonb(v_p), 'attendance', to_jsonb(v_att));
+      select * into v_s from public.event_sessions where id = v_att.session_id;
+      return jsonb_build_object('status', 'ok', 'participant', to_jsonb(v_p), 'attendance', to_jsonb(v_att), 'session', public.session_json(v_s));
     end if;
   end if;
 
@@ -362,21 +431,38 @@ begin
     return jsonb_build_object('status', 'closed', 'participant', to_jsonb(v_p));
   end if;
 
+  -- tentukan sesi
+  if public.event_has_sessions(p_event_id) then
+    if p_session_id is not null then
+      select * into v_s from public.event_sessions where id = p_session_id and event_id = p_event_id;
+    else
+      v_s := public.active_session(p_event_id, v_at);
+    end if;
+    if v_s.id is null then
+      return jsonb_build_object('status', 'no_session', 'participant', to_jsonb(v_p));
+    end if;
+    if not public.in_session(v_p, v_s) then
+      return jsonb_build_object('status', 'not_in_session', 'participant', to_jsonb(v_p), 'session', public.session_json(v_s));
+    end if;
+    v_late := v_s.late_after is not null and v_at > v_s.late_after;
+  end if;
+
   insert into public.attendances (event_id, participant_id, name, category, data, checked_in_at,
-                                  scanned_by, device_label, source, client_id)
+                                  scanned_by, device_label, source, client_id, session_id, is_late)
   values (p_event_id, v_p.id, v_p.name, v_p.category, v_p.data, v_at, auth.uid(), p_device_label,
-          case when p_participant_id is not null then 'manual' else 'scan' end, p_client_id)
-  on conflict on constraint attendances_event_participant_key do nothing
+          case when p_participant_id is not null then 'manual' else 'scan' end, p_client_id, v_s.id, v_late)
+  on conflict (event_id, participant_id, (coalesce(session_id, '00000000-0000-0000-0000-000000000000'::uuid))) do nothing
   returning * into v_att;
 
   if not found then
-    select * into v_att from public.attendances where event_id = p_event_id and participant_id = v_p.id;
+    select * into v_att from public.attendances
+    where event_id = p_event_id and participant_id = v_p.id and session_id is not distinct from v_s.id;
     select full_name into v_by from public.profiles where id = v_att.scanned_by;
     return jsonb_build_object('status', 'duplicate', 'participant', to_jsonb(v_p),
-                              'attendance', to_jsonb(v_att), 'scanned_by_name', v_by);
+                              'attendance', to_jsonb(v_att), 'scanned_by_name', v_by, 'session', public.session_json(v_s));
   end if;
 
-  return jsonb_build_object('status', 'ok', 'participant', to_jsonb(v_p), 'attendance', to_jsonb(v_att));
+  return jsonb_build_object('status', 'ok', 'participant', to_jsonb(v_p), 'attendance', to_jsonb(v_att), 'session', public.session_json(v_s));
 end $$;
 
 -- 5b. Kode QR acara saat ini (untuk layar display, khusus anggota)
@@ -397,14 +483,18 @@ begin
     'rotating', coalesce((v_event.settings->>'rotating_qr')::boolean, false),
     'code', public.event_code(v_event.public_token, v_event.qr_secret, v_win),
     'expires_in', v_rot - (v_epoch % v_rot),
-    'rotate_seconds', v_rot
+    'rotate_seconds', v_rot,
+    'session', public.session_json(public.active_session(p_event_id))
   );
 end $$;
 
 -- 5c. Data acara publik (untuk formulir peserta, tanpa login)
 create or replace function public.get_public_event(p_token text)
 returns jsonb language sql stable security definer set search_path = public as $$
-  select public.safe_event_json(e) from public.events e where e.public_token = p_token and e.is_active;
+  select public.safe_event_json(e) || jsonb_build_object(
+           'has_sessions', public.event_has_sessions(e.id),
+           'session', public.session_json(public.active_session(e.id)))
+  from public.events e where e.public_token = p_token and e.is_active;
 $$;
 
 -- 5d. Submit formulir publik (mode QR Acara, atau tamu tidak terdaftar di mode Campuran)
@@ -419,6 +509,7 @@ declare
   v_ukey   text;
   v_name   text;
   v_att    public.attendances;
+  v_s      public.event_sessions;
 begin
   select * into v_event from public.events where public_token = p_token and is_active;
   if not found or v_event.mode = 'participant_qr' then
@@ -429,6 +520,10 @@ begin
   end if;
   if not public.event_is_open(v_event) then
     return jsonb_build_object('status', 'closed');
+  end if;
+  if public.event_has_sessions(v_event.id) then
+    v_s := public.active_session(v_event.id);
+    if v_s.id is null then return jsonb_build_object('status', 'no_session'); end if;
   end if;
   if octet_length(coalesce(p_data, '{}'::jsonb)::text) > 1500000 then
     return jsonb_build_object('status', 'too_large');
@@ -457,7 +552,8 @@ begin
 
   -- satu kali per perangkat
   if coalesce((v_event.settings->>'one_submit_per_device')::boolean, false) and p_device_id is not null
-     and exists (select 1 from public.attendances where event_id = v_event.id and device_id = p_device_id) then
+     and exists (select 1 from public.attendances where event_id = v_event.id and device_id = p_device_id
+                 and session_id is not distinct from v_s.id) then
     return jsonb_build_object('status', 'duplicate', 'reason', 'device');
   end if;
 
@@ -465,20 +561,22 @@ begin
   v_ukey := nullif(v_event.settings->>'unique_field', '');
   if v_ukey is not null and coalesce(trim(p_data->>v_ukey), '') <> ''
      and exists (select 1 from public.attendances
-                 where event_id = v_event.id and lower(trim(data->>v_ukey)) = lower(trim(p_data->>v_ukey))) then
+                 where event_id = v_event.id and session_id is not distinct from v_s.id
+                   and lower(trim(data->>v_ukey)) = lower(trim(p_data->>v_ukey))) then
     return jsonb_build_object('status', 'duplicate', 'reason', 'unique_field');
   end if;
 
   v_name := coalesce(nullif(trim(p_data->>'nama'), ''), 'Tanpa nama');
 
-  insert into public.attendances (event_id, name, category, data, source, device_id, device_label)
+  insert into public.attendances (event_id, name, category, data, source, device_id, device_label, session_id, is_late)
   values (v_event.id, left(v_name, 200),
           case when v_event.mode = 'hybrid' then coalesce(nullif(v_event.settings->'walkin'->>'category', ''), 'Tamu tambahan')
                else nullif(p_data->>'kategori', '') end,
-          p_data, 'form', p_device_id, 'Formulir')
+          p_data, 'form', p_device_id, 'Formulir', v_s.id, coalesce(v_s.late_after < now(), false))
   returning * into v_att;
 
-  return jsonb_build_object('status', 'ok', 'name', v_att.name, 'checked_in_at', v_att.checked_in_at);
+  return jsonb_build_object('status', 'ok', 'name', v_att.name, 'checked_in_at', v_att.checked_in_at,
+                            'is_late', v_att.is_late, 'session', public.session_json(v_s));
 end $$;
 
 -- 5e. E-ticket publik (siapa pun yang memegang token tiket)
@@ -498,8 +596,19 @@ returns jsonb language sql stable security definer set search_path = public as $
     ),
     'event', public.safe_event_json(e),
     'self_checkin_allowed', public.can_self_checkin(p, e),
+    'session', public.session_json(public.active_session(e.id)),
     'checked_in_at', (select a.checked_in_at from public.attendances a
-                      where a.event_id = e.id and a.participant_id = p.id)
+                      where a.event_id = e.id and a.participant_id = p.id
+                        and a.session_id is not distinct from (public.active_session(e.id)).id
+                      order by a.checked_in_at desc limit 1),
+    'sessions', coalesce((
+      select jsonb_agg(jsonb_build_object(
+               'name', s.name, 'starts_at', s.starts_at, 'ends_at', s.ends_at,
+               'checked_in_at', a.checked_in_at, 'is_late', coalesce(a.is_late, false)) order by s.starts_at)
+      from public.event_sessions s
+      left join public.attendances a on a.session_id = s.id and a.participant_id = p.id
+      where s.event_id = e.id and public.in_session(p, s)
+    ), '[]'::jsonb)
   )
   from public.participants p join public.events e on e.id = p.event_id
   where p.qr_token = p_qr_token;
@@ -516,6 +625,8 @@ declare
   v_att public.attendances;
   v_rot int;
   v_win bigint;
+  v_s   public.event_sessions;
+  v_late boolean := false;
 begin
   select * into v_p from public.participants where qr_token = p_ticket;
   if not found then return jsonb_build_object('status', 'invalid'); end if;
@@ -544,16 +655,28 @@ begin
     end if;
   end if;
 
-  insert into public.attendances (event_id, participant_id, name, category, data, source, device_id, device_label)
-  values (v_e.id, v_p.id, v_p.name, v_p.category, v_p.data, 'self', left(p_device_id, 64), 'Mandiri')
-  on conflict on constraint attendances_event_participant_key do nothing
+  if public.event_has_sessions(v_e.id) then
+    v_s := public.active_session(v_e.id);
+    if v_s.id is null then return jsonb_build_object('status', 'no_session', 'name', v_p.name); end if;
+    if not public.in_session(v_p, v_s) then
+      return jsonb_build_object('status', 'not_in_session', 'name', v_p.name, 'session', public.session_json(v_s));
+    end if;
+    v_late := v_s.late_after is not null and now() > v_s.late_after;
+  end if;
+
+  insert into public.attendances (event_id, participant_id, name, category, data, source, device_id, device_label, session_id, is_late)
+  values (v_e.id, v_p.id, v_p.name, v_p.category, v_p.data, 'self', left(p_device_id, 64), 'Mandiri', v_s.id, v_late)
+  on conflict (event_id, participant_id, (coalesce(session_id, '00000000-0000-0000-0000-000000000000'::uuid))) do nothing
   returning * into v_att;
 
   if not found then
-    select * into v_att from public.attendances where event_id = v_e.id and participant_id = v_p.id;
-    return jsonb_build_object('status', 'duplicate', 'name', v_p.name, 'checked_in_at', v_att.checked_in_at, 'source', v_att.source);
+    select * into v_att from public.attendances
+    where event_id = v_e.id and participant_id = v_p.id and session_id is not distinct from v_s.id;
+    return jsonb_build_object('status', 'duplicate', 'name', v_p.name, 'checked_in_at', v_att.checked_in_at,
+                              'source', v_att.source, 'session', public.session_json(v_s));
   end if;
-  return jsonb_build_object('status', 'ok', 'name', v_p.name, 'category', v_p.category, 'checked_in_at', v_att.checked_in_at);
+  return jsonb_build_object('status', 'ok', 'name', v_p.name, 'category', v_p.category, 'checked_in_at', v_att.checked_in_at,
+                            'is_late', v_att.is_late, 'session', public.session_json(v_s));
 end $$;
 
 -- 5f. Bergabung sebagai operator dengan kode undangan
@@ -592,8 +715,8 @@ begin
 end $$;
 
 revoke all on function public.event_code(text, text, bigint) from public, anon, authenticated;
-revoke all on function public.check_in(uuid, text, uuid, text, text, timestamptz) from public, anon;
-grant execute on function public.check_in(uuid, text, uuid, text, text, timestamptz) to authenticated;
+revoke all on function public.check_in(uuid, text, uuid, text, text, timestamptz, uuid) from public, anon;
+grant execute on function public.check_in(uuid, text, uuid, text, text, timestamptz, uuid) to authenticated;
 grant execute on function public.get_public_event(text) to anon, authenticated;
 grant execute on function public.submit_public_attendance(text, text, jsonb, text) to anon, authenticated;
 grant execute on function public.get_ticket(text) to anon, authenticated;
@@ -609,6 +732,7 @@ do $$ begin
   begin alter publication supabase_realtime add table public.attendances;  exception when duplicate_object then null; end;
   begin alter publication supabase_realtime add table public.participants; exception when duplicate_object then null; end;
   begin alter publication supabase_realtime add table public.events;       exception when duplicate_object then null; end;
+  begin alter publication supabase_realtime add table public.event_sessions; exception when duplicate_object then null; end;
 end $$;
 
 -- ---------------------------------------------------------------------

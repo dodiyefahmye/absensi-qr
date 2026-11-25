@@ -8,9 +8,10 @@ import { categoryColor, contrastInk } from '../lib/theme.js';
 import { toExcel, readSpreadsheet } from '../lib/exporter.js';
 import { loadJSZip } from '../lib/vendor.js';
 import { canSelfCheckin, selfCheckinConfig } from '../lib/rules.js';
+import { inSession } from '../lib/sessions.js';
 
 export function participantsTab(body, { ev }) {
-  let people = [], attended = new Map(), shown = 200;
+  let people = [], attended = new Map(), shown = 200, sessions = [], sessCount = new Map();
   const q = h('input', { type: 'search', placeholder: 'Cari nama / data…', style: { maxWidth: '260px' } });
   const cat = h('select', { style: { maxWidth: '180px' } }, h('option', { value: '' }, 'Semua kategori'), (ev.categories || []).map((c) => h('option', { value: c.name }, c.name)));
   const status = h('select', { style: { maxWidth: '160px' } }, h('option', { value: '' }, 'Semua status'), h('option', { value: 'hadir' }, 'Sudah hadir'), h('option', { value: 'belum' }, 'Belum hadir'));
@@ -45,9 +46,11 @@ export function participantsTab(body, { ev }) {
 
   async function load() {
     try {
-      const [p, a] = await Promise.all([api.listParticipants(ev.id), api.listAttendances(ev.id)]);
-      people = p;
+      const [p, a, ss] = await Promise.all([api.listParticipants(ev.id), api.listAttendances(ev.id), api.listSessions(ev.id).catch(() => [])]);
+      people = p; sessions = ss;
       attended = new Map(a.filter((x) => x.participant_id).map((x) => [x.participant_id, x]));
+      sessCount = new Map();
+      for (const x of a) if (x.participant_id && x.session_id) sessCount.set(x.participant_id, (sessCount.get(x.participant_id) || 0) + 1);
       render();
     } catch (e) { tableBox.replaceChildren(h('p', { class: 'muted' }, errMsg(e))); }
   }
@@ -77,7 +80,10 @@ export function participantsTab(body, { ev }) {
         h('td', null, h('strong', null, p.name), p.email || p.phone ? h('div', { class: 'small muted' }, [p.email, p.phone].filter(Boolean).join(' · ')) : null),
         h('td', null, p.category ? h('span', { class: 'badge', style: { background: col, color: contrastInk(col), borderColor: col } }, p.category) : ''),
         ...extraFields.slice(0, 2).map((f) => h('td', { class: 'small hide-sm' }, displayValue(f, p.data?.[f.key]))),
-        h('td', null, a ? h('span', { class: 'badge ok' }, '✓ ' + fmtTime(a.checked_in_at)) : h('span', { class: 'badge' }, 'Belum')),
+        h('td', null, sessions.length
+          ? (() => { const need = sessions.filter((x) => inSession(p, x)).length, got = sessCount.get(p.id) || 0;
+              return h('span', { class: 'badge ' + (got && got >= need ? 'ok' : got ? 'warn' : ''), title: 'Jumlah sesi yang sudah dihadiri' }, `${got}/${need} sesi`); })()
+          : a ? h('span', { class: 'badge ok' }, '✓ ' + fmtTime(a.checked_in_at)) : h('span', { class: 'badge' }, 'Belum')),
         scOn ? h('td', null, selfBadge(p)) : null,
         h('td', { class: 'actions' },
           h('button', { class: 'btn sm', title: 'E-ticket & QR', onclick: () => ticketDialog(p) }, '🎫'),
@@ -317,7 +323,7 @@ export function participantsTab(body, { ev }) {
   const unsub = api.subscribeEvent(ev.id, {
     attendance: (type, row, old) => {
       if (type === 'DELETE') { for (const [k, v] of attended) if (v.id === old?.id) attended.delete(k); }
-      else if (row?.participant_id) attended.set(row.participant_id, row);
+      else if (row?.participant_id) { attended.set(row.participant_id, row); if (row.session_id && type === 'INSERT') sessCount.set(row.participant_id, (sessCount.get(row.participant_id) || 0) + 1); }
       render();
     },
   });

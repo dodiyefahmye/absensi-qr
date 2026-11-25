@@ -3,13 +3,18 @@ import * as api from '../lib/api.js';
 import { h, errMsg, fmtDate, hhmm, copyText } from '../lib/ui.js';
 import { applyTheme, normalizeTheme, categoryColor, contrastInk } from '../lib/theme.js';
 import { drawQR, publicFormUrl } from '../lib/qr.js';
+import { activeSession, sortSessions, inSession, nextSession } from '../lib/sessions.js';
 
 export default async function display(root, { params }) {
   let ev, count = 0, total = 0, latest = [];
+  let people = [], allAtts = [], sessions = [], cur = null;
+  const loadAll = async () => {
+    const [p, a, ss] = await Promise.all([api.listParticipants(ev.id), api.listAttendances(ev.id), api.listSessions(ev.id).catch(() => [])]);
+    people = p; allAtts = a; sessions = sortSessions(ss);
+  };
   try {
     ev = await api.getEvent(params.id);
-    const [c, a] = await Promise.all([api.eventCounts(ev.id), api.listAttendances(ev.id)]);
-    count = c.attendances; total = c.participants; latest = a.slice(0, 8);
+    await loadAll();
   } catch (e) {
     root.appendChild(h('div', { class: 'container narrow' }, h('div', { class: 'card center', style: { marginTop: '10vh' } }, h('h2', null, 'Gagal memuat'), h('p', { class: 'muted' }, errMsg(e)), h('a', { class: 'btn', href: '#/' }, 'Kembali'))));
     return;
@@ -20,6 +25,7 @@ export default async function display(root, { params }) {
   root.appendChild(page);
 
   const countEl = h('div', { class: 'display-count' });
+  const sessionEl = h('div', { style: { fontSize: '1.25rem', fontWeight: 700, marginTop: '.2rem' } });
   const totalEl = h('div', { style: { fontSize: '1.4rem', fontWeight: 700, opacity: .8 } });
   const welcome = h('div', { style: { minHeight: '5rem', marginTop: '1rem' } });
   const listEl = h('ul', { class: 'display-list' });
@@ -51,12 +57,24 @@ export default async function display(root, { params }) {
     h('div', { class: 'display-main' },
       left,
       h('div', null,
-        h('div', { style: { fontSize: '1.3rem', fontWeight: 700, opacity: .8 } }, 'Jumlah hadir'),
+        h('div', { style: { fontSize: '1.3rem', fontWeight: 700, opacity: .8 } }, 'Jumlah hadir'), sessionEl,
         countEl, totalEl, welcome,
         h('div', { style: { fontWeight: 700, marginTop: '1rem', opacity: .7 } }, 'Terakhir hadir'),
         listEl)),
     h('div', { class: 'display-foot' }, h('span', null, ev.organizer || ''), clock));
 
+  const sameSession = (sid) => !sessions.length || (sid || null) === (cur?.id || null);
+  function derive() {
+    cur = sessions.length ? activeSession(sessions) : null;
+    const atts = allAtts.filter((a) => sameSession(a.session_id));
+    count = atts.length;
+    total = sessions.length ? people.filter((p) => inSession(p, cur)).length : people.length;
+    latest = atts.slice().sort((a, b) => new Date(b.checked_in_at) - new Date(a.checked_in_at)).slice(0, 10);
+    if (sessions.length) {
+      const nx = nextSession(sessions);
+      sessionEl.textContent = cur ? `🗓 ${cur.name}` : `Tidak ada sesi berlangsung${nx ? ` · berikutnya: ${nx.name} (${new Date(nx.starts_at).toLocaleString('id-ID', { weekday: 'short', hour: '2-digit', minute: '2-digit' })})` : ''}`;
+    } else sessionEl.textContent = '';
+  }
   function renderCount() {
     countEl.textContent = count;
     totalEl.textContent = total && !isEventQR ? `dari ${total} undangan (${Math.round((count / total) * 100)}%)` : '';
@@ -109,19 +127,27 @@ export default async function display(root, { params }) {
 
   const unsub = api.subscribeEvent(ev.id, {
     attendance: (type, row, old) => {
-      if (type === 'INSERT' && row) { count++; latest.unshift(row); latest = latest.slice(0, 10); greet(row); }
-      if (type === 'DELETE') { count = Math.max(0, count - 1); latest = latest.filter((x) => x.id !== old?.id); }
+      if (type === 'INSERT' && row) { allAtts.unshift(row); if (sameSession(row.session_id)) greet(row); }
+      if (type === 'DELETE') allAtts = allAtts.filter((x) => x.id !== old?.id);
+      derive();
       renderCount(); renderList();
     },
-    participant: (type) => { if (type === 'INSERT') total++; if (type === 'DELETE') total = Math.max(0, total - 1); renderCount(); },
+    participant: (type, row, old) => {
+      if (type === 'DELETE') people = people.filter((p) => p.id !== old?.id);
+      else if (row) { const i = people.findIndex((p) => p.id === row.id); if (i >= 0) people[i] = row; else people.push(row); }
+      derive(); renderCount();
+    },
+    sessions: async () => { try { sessions = sortSessions(await api.listSessions(ev.id)); derive(); renderCount(); renderList(); } catch (e) { /* */ } },
     event: (row) => { if (row && isEventQR) refreshQR(); },
   });
 
   // sinkron ulang berkala (jaga-jaga jika ada event realtime terlewat)
   const resync = setInterval(async () => {
-    try { const c = await api.eventCounts(ev.id); count = c.attendances; total = c.participants; renderCount(); } catch (e) { /* */ }
+    try { await loadAll(); derive(); renderCount(); renderList(); } catch (e) { /* */ }
   }, 60000);
 
-  renderCount(); renderList();
-  return () => { unsub(); clearTimeout(qrTimer); clearInterval(tickTimer); clearInterval(clockTimer); clearInterval(resync); clearTimeout(welcomeTimer); };
+  // pergantian sesi sesuai jam
+  const sessionTimer = setInterval(() => { if (sessions.length) { const before = cur?.id; derive(); if (cur?.id !== before) { renderCount(); renderList(); } } }, 20000);
+  derive(); renderCount(); renderList();
+  return () => { unsub(); clearTimeout(qrTimer); clearInterval(tickTimer); clearInterval(clockTimer); clearInterval(resync); clearInterval(sessionTimer); clearTimeout(welcomeTimer); };
 }
